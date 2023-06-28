@@ -2,28 +2,12 @@ import bmtrain as bmt
 import torch
 from bmtrain.distributed import send_activations, recv_activations, reduce_scatter, broadcast, all_gather
 from einops import rearrange, repeat
-from bmtrain.distributed.ops import ncclSend, ncclRecv
-from bmtrain.nccl import commCount, groupEnd, groupStart
-def ring_bmt(tensor):
-    return ring_send_recv(tensor, bmt.rank(), bmt.config["comm"])
-
-def ring_send_recv(tensor, rank, comm):
-    tensor = tensor.contiguous()
-    count = commCount(comm)
-    next_rank = (rank + 1) % count
-    prev_rank = (rank - 1 + count) % count
-    res = torch.ones_like(tensor, device="cuda", dtype=tensor.dtype)
-    groupStart()
-    if rank%2 == 0:
-        ncclSend(tensor.storage(), next_rank, comm)
-        ncclRecv(res.storage(), prev_rank, comm)
-    else:
-        ncclRecv(res.storage(), prev_rank, comm)
-        ncclSend(tensor.storage(), next_rank, comm)
-    groupEnd()
-    return res
-
+from comm import ring_bmt
+from test_ring_attn import ring_attn
+# from flash_attn.flash_attn_triton2 import 
+import subprocess
 def inter_attn(q, k, v, m_i, acc_o, softmax_scale=1.0):
+
     qk = q @ k.transpose(-2, -1)*softmax_scale
     m_ij = torch.maximum(torch.max(qk, dim=-1, keepdim=True)[0], m_i)
     p = torch.exp(qk - m_ij)
@@ -32,6 +16,11 @@ def inter_attn(q, k, v, m_i, acc_o, softmax_scale=1.0):
     acc_o = p @ v + acc_o_scale * acc_o
     return m_ij, l_ij, acc_o
 
+def inter_flash_attn(q, k, v, m_i, acc_o, softamx_scale=1.0):
+    q = q.transpose(1,2)
+    k = k.transpose(1,2)
+    v = v.transpose(1,2)
+    return FlashAttnFunc.apply(q,k,v,softmax_scale=softamx_scale)
 
 class OpBurstAttn(torch.autograd.Function):
     """
@@ -56,7 +45,9 @@ class OpBurstAttn(torch.autograd.Function):
         for j in range(bmt.world_size()-1):
             k = ring_bmt(k)
             v = ring_bmt(v)
-            m_ij, l_ij, acc_o = inter_attn(q, k, v, m_i, acc_o, softmax_scale=1.0)
+            with torch.no_grad():
+                m_ij, l_ij, acc_o = inter_attn(q, k, v, m_i, acc_o, softmax_scale=1.0)
+            # m_ij = torch.maximum(m_ij, m_i)
             m_i = m_ij
             l_i_new = torch.exp(lse_i - m_ij) + l_ij
             lse_i = torch.log(l_i_new) + m_ij
@@ -67,6 +58,7 @@ class OpBurstAttn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+    
         q, k, v, lse_i, o_i = ctx.saved_tensors
         batch_size, num_heads, seqlen, head_dim = q.shape
         delta = (o_i * grad_output).sum(-1, keepdim=True)
@@ -95,8 +87,6 @@ class OpBurstAttn(torch.autograd.Function):
             d_k += d_s.transpose(-2, -1) @ q
             start = (start - seqlen) % (seqlen * bmt.world_size())
             end = (end - seqlen) % (seqlen * bmt.world_size())
-            if bmt.rank() == 0:
-                print(end)
             if end < start:
                 d_q_whole[:, :, start:, :] += d_s @ k
             else:
@@ -105,13 +95,78 @@ class OpBurstAttn(torch.autograd.Function):
         d_q = reduce_scatter(d_q_whole, bmt.config["comm"])
         d_q = rearrange(d_q, "s n b h -> b n s h")
         return d_q, d_k, d_v, None, None, None
+    
+def test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,desc,backward=False):
+    bmt.init_distributed()
+    q_whole = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float32)
+    k_whole = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float32)
+    v_whole = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float32)
+    q_whole = broadcast(q_whole, 0, bmt.config["comm"]).detach().requires_grad_()
+    k_whole = broadcast(k_whole, 0, bmt.config["comm"]).detach().requires_grad_()
+    v_whole = broadcast(v_whole, 0, bmt.config["comm"]).detach().requires_grad_()
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(1):
+        func(q_whole,k_whole,v_whole,backward)
+    output = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader']).decode("utf-8").split("\n")[0]
+    end.record()
+    torch.cuda.synchronize()
+    if bmt.rank() == 0:
+        print(f"{desc} forward: {start.elapsed_time(end)} ms")
+        print(f"Memory used:{output}")
+def ref_attn(q, k, v):
+    s = q @ k.transpose(-2, -1)
+    s = torch.softmax(s, dim=-1)
+    p = s @ v
+    return p
 
+def test_ref(q, k ,v, backward=False):
+    res_ref = ref_attn(q, k, v)
+    g = torch.randn_like(res_ref)
+    if backward:
+        torch.autograd.grad(res_ref, (q, k, v), g)
+
+def test_burst(q, k, v, backward=False):
+    sub_seq = q.shape[2] // bmt.world_size()
+    q = q[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    k = k[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    v = v[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    res_burst = OpBurstAttn.apply(q, k, v, None)
+    if backward:
+        g = torch.ones_like(res_burst)
+        dq,dk,dv=torch.autograd.grad(res_burst, (q, k, v), g)
+    return dq
+def test_ring(q, k ,v, backward=False):
+    sub_seq = q.shape[2] // bmt.world_size()
+    q = q[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    k = k[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    v = v[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    res_ring = ring_attn(q,k,v)
+    if backward:
+        g = torch.ones_like(res_ring)
+        dq,dk,dv=torch.autograd.grad(res_ring, (q, k, v), g)
+    return dq
+# def test_falsh(q,k,v,backward=False):
+def test_backward():
+    batch = 2
+    seqlen = 1024
+    head_dim = 32
+    num_heads = 16
+    bmt.init_distributed()
+    q_whole = torch.randn((batch, num_heads, seqlen, head_dim),device="cuda")
+    k_whole = torch.randn((batch, num_heads, seqlen, head_dim),device="cuda")
+    v_whole = torch.randn((batch, num_heads, seqlen, head_dim),device="cuda")
+    q_whole = broadcast(q_whole, 0, bmt.config["comm"]).detach().requires_grad_()
+    k_whole = broadcast(k_whole, 0, bmt.config["comm"]).detach().requires_grad_()
+    v_whole = broadcast(v_whole, 0, bmt.config["comm"]).detach().requires_grad_()
+    res1 = test_burst(q_whole,k_whole,v_whole,True)
+    res2 = test_ring(q_whole,k_whole,v_whole,True)
+    if bmt.rank() == 1:
+        print(res1[0])
+        print(res2[0])
 def test():
-    def ref_attn(q, k, v):
-        s = q @ k.transpose(-2, -1)
-        s = torch.softmax(s, dim=-1)
-        p = s @ v
-        return p
     batch = 2
     seqlen = 1024
     head_dim = 32
@@ -145,5 +200,34 @@ def test():
     print((dq-dq_ref_sub).abs().max())
     print((dk-dk_ref_sub).abs().max())
     print((dv-dv_ref_sub).abs().max())
+
+
+
 if __name__ == "__main__":
-    test()
+    test_backward()
+    # test()
+    # import argparse
+    # parser = argparse.ArgumentParser(description='Test multi-gpu function')
+
+    # # 添加命令行参数
+    # parser.add_argument('--batch-size', type=int, default=16, help='Batch size')
+    # parser.add_argument('--hidden-size', type=int, default=256, help='Hidden size')
+    # parser.add_argument('--seqlen', type=int, default=128, help='Sequence length')
+    # parser.add_argument('--num-heads', type=int, default=8, help='Number of attention heads')
+    # parser.add_argument('--func', type=str, default='sigmoid', help='Activation function')
+    # parser.add_argument('--desc', type=str, default="Test", help='Description')
+    # parser.add_argument("--backward",action="store_true")
+    # # 解析命令行参数
+    # args = parser.parse_args()
+    # batch_size = args.batch_size
+    # hidden_size = args.hidden_size
+    # seqlen = args.seqlen
+    # num_heads = args.num_heads
+    # if args.func == "burst":
+    #     func = test_burst
+    # elif args.func == "normal":
+    #     func = test_ref
+    # elif args.func == 'ring':
+    #     func = test_ring
+    
+    # test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,args.desc,args.backward)
