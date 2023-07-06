@@ -3,7 +3,8 @@ import torch
 from bmtrain.distributed import send_activations, recv_activations, reduce_scatter, broadcast, all_gather
 from einops import rearrange, repeat
 from .comm import ring_bmt
-# from .test_ring_attn import ring_attn
+import math
+from .test_ring_attn import ring_attn
 # from flash_attn.flash_attn_triton2 import 
 from .flash_attn import _flash_attn_forward,_flash_attn_backward
 import subprocess
@@ -79,13 +80,15 @@ class OpBurstAttn(torch.autograd.Function):
     bias: [N, S, S] (num_heads, sub_seqlen, sub_seqlen)
     """
     @staticmethod
-    def forward(ctx, query, key ,value, mask, softmax_scale=1.0, flash=False):
+    def forward(ctx, query, key ,value, softmax_scale=None, flash=False):
         
         q = query.contiguous()
         k = key.contiguous()
         v = value.contiguous()
-        
-        ctx.softmax_scale = softmax_scale
+        if softmax_scale is None:
+            ctx.softmax_scale = 1/math.sqrt(q.shape[-1])
+        else:
+            ctx.softmax_scale = softmax_scale
         m_i = None
         acc_o = None
         ctx.flash=flash
@@ -143,7 +146,7 @@ class OpBurstAttn(torch.autograd.Function):
         d_q = rearrange(d_q, "s n b h -> b n s h")
         return d_q, d_k, d_v, None, None, None
     
-def test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,desc,backward=False):
+def test_multi_gpu(batch_size, hidden_size, seqlen, num_heads, func, desc, backward=False):
     bmt.init_distributed()
     q_whole = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float32)
     k_whole = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float32)
@@ -156,7 +159,7 @@ def test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,desc,backward=Fa
     end = torch.cuda.Event(enable_timing=True)
     start.record()
     for _ in range(1):
-        func(q_whole,k_whole,v_whole,backward)
+        func(q_whole, k_whole, v_whole, backward)
     output = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader']).decode("utf-8").split("\n")[0]
     end.record()
     torch.cuda.synchronize()
@@ -164,10 +167,13 @@ def test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,desc,backward=Fa
         print(f"{desc} forward: {start.elapsed_time(end)} ms")
         print(f"Memory used:{output}")
 
-def ref_attn(q, k, v):
-    s = q @ k.transpose(-2, -1)
-    s = torch.softmax(s, dim=-1)
-    p = s @ v
+def ref_attn(q, k, v, flash=False):
+    if not flash:
+        s = q @ k.transpose(-2, -1)
+        s = torch.softmax(s, dim=-1)
+        p = s @ v
+    else:
+        
     return p
 
 def test_ref(q, k ,v, backward=False):
@@ -186,6 +192,7 @@ def test_burst(q, k, v, backward=False):
         g = torch.ones_like(res_burst)
         dq,dk,dv=torch.autograd.grad(res_burst, (q, k, v), g)
     return dq
+
 def test_ring(q, k ,v, backward=False):
     sub_seq = q.shape[2] // bmt.world_size()
     q = q[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
@@ -196,7 +203,7 @@ def test_ring(q, k ,v, backward=False):
         g = torch.ones_like(res_ring)
         dq,dk,dv=torch.autograd.grad(res_ring, (q, k, v), g)
     return dq
-# def test_falsh(q,k,v,backward=False):
+
 def test_backward():
     batch = 2
     seqlen = 1024
@@ -214,6 +221,7 @@ def test_backward():
     if bmt.rank() == 1:
         print(res1[0])
         print(res2[0])
+
 def test():
     batch = 2
     seqlen = 1024
@@ -278,4 +286,4 @@ if __name__ == "__main__":
     elif args.func == 'ring':
         func = test_ring
     
-    test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,args.desc,args.backward)
+    test_multi_gpu(batch_size, hidden_size, seqlen,num_heads, func, args.desc, args.backward)
