@@ -2,11 +2,11 @@ import bmtrain as bmt
 import torch
 from bmtrain.distributed import send_activations, recv_activations, reduce_scatter, broadcast, all_gather
 from einops import rearrange, repeat
-from .comm import ring_bmt
+from comm import ring_bmt
 import math
-from .test_ring_attn import ring_attn
+from test_ring_attn import ring_attn
 # from flash_attn.flash_attn_triton2 import 
-from .flash_attn import _flash_attn_forward,_flash_attn_backward
+from flash_attn import _flash_attn_forward,_flash_attn_backward
 import subprocess
 
 def inter_normal_attn(q, k, v, m_i, acc_o, softmax_scale=1.0):
@@ -96,16 +96,16 @@ class OpBurstAttn(torch.autograd.Function):
             forward_func = inter_flash_attn
         else:
             forward_func = inter_normal_attn
-        acc_o,m_i,l_ij = forward_func(q, k, v, m_i, acc_o, softmax_scale)
+        acc_o,m_i,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
         lse_i = torch.log(l_ij) + m_i
         for j in range(bmt.world_size()-1):
             k = ring_bmt(k)
             v = ring_bmt(v)
             if not ctx.flash:
                 with torch.no_grad():
-                    acc_o,m_ij,l_ij = forward_func(q, k, v, m_i, acc_o, softmax_scale)
+                    acc_o,m_ij,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
             else:
-                acc_o,m_ij,l_ij = forward_func(q, k, v, m_i, acc_o, softmax_scale)
+                acc_o,m_ij,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
             m_i = m_ij
             l_i_new = torch.exp(lse_i - m_ij) + l_ij
             lse_i = torch.log(l_i_new) + m_ij
@@ -172,8 +172,6 @@ def ref_attn(q, k, v, flash=False):
         s = q @ k.transpose(-2, -1)
         s = torch.softmax(s, dim=-1)
         p = s @ v
-    else:
-        
     return p
 
 def test_ref(q, k ,v, backward=False):
