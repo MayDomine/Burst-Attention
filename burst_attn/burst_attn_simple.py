@@ -40,7 +40,7 @@ def inter_flash_attn(q, k, v, m_i, acc_o, softmax_scale=1.0):
     q = q.transpose(1,2).contiguous()
     k = k.transpose(1,2).contiguous()
     v = v.transpose(1,2).contiguous()
-    m_i = m_i.squeeze().contiguous() if m_i is not None else None
+    m_i = m_i.squeeze(-1).contiguous() if m_i is not None else None
     if m_i is None:
         b,s,n,d = q.shape
         m_i = (-torch.ones((b,n,s),dtype=torch.float32,device="cuda") * torch.inf).contiguous()

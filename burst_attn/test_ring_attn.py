@@ -13,7 +13,7 @@ def _calc_current_device_range(rank, sub_seq_length):
 class RingQK(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, sub_q, sub_k, batch_size, num_attention_heads, sub_seq_length):
+    def forward(ctx, sub_q, sub_k, batch_size, num_attention_heads, sub_seq_length, softmax_scale):
         ctx.save_for_backward(sub_q, sub_k)
         ctx.sub_seq_length = sub_seq_length
 
@@ -22,8 +22,8 @@ class RingQK(torch.autograd.Function):
                                       sub_seq_length * bmt.world_size(),
                                       dtype=sub_q.dtype,
                                       device="cuda")
-
-        part_a = torch.matmul(sub_q, sub_k.transpose(2, 1))
+        ctx.softmax_scale = softmax_scale
+        part_a = torch.matmul(sub_q, sub_k.transpose(2, 1)) * softmax_scale
         local_rank = bmt.rank()
         local_world_size = bmt.world_size()
         start_idx = local_rank * sub_seq_length
@@ -66,7 +66,7 @@ class RingQK(torch.autograd.Function):
 
         grad_q /= local_world_size
 
-        return grad_q, grad_k, None, None, None
+        return grad_q, grad_k, None, None, None, None
 
 
 class RingAV(torch.autograd.Function):
@@ -125,7 +125,7 @@ class RingAV(torch.autograd.Function):
             # compute grad_q
             grad_attention_score[:, :, start_idx:end_idx] += torch.matmul(grad_output, sub_v.transpose(2, 1))
         return grad_attention_score, grad_v, None, None, None, None
-def ring_attn(q,k,v):
+def ring_attn(q,k,v, sm_scale=1.0):
     batch_size = q.shape[0]
     num_heads = q.shape[1]
     sub_seq = q.shape[2]
@@ -133,7 +133,7 @@ def ring_attn(q,k,v):
     q = q.flatten(0,1)
     k = k.flatten(0,1)
     v = v.flatten(0,1)
-    attn_score = RingQK.apply(q,k,batch_size,num_heads,sub_seq)
+    attn_score = RingQK.apply(q,k,batch_size,num_heads,sub_seq,sm_scale)
     attn_score = torch.softmax(attn_score, dim=-1)
     out = RingAV.apply(attn_score,v,batch_size,num_heads,hidden_dim,sub_seq)
     return out
