@@ -32,11 +32,12 @@ def attn_exp():
                         desc = f"batch_size={batch_size}, num_heads={num_head}, seqlen={seqlen}, func={func}, backward={backward}"
                         exp = AttentionExp(name="attn_{func}", batch_size=batch_size, hidden_size=32, num_heads=num_head, desc=desc, seqlen=seqlen, func=func, backward=backward)
                         yield exp
-
-def run_exp(exp:AttentionExp):
-    os.environ["NCCL_P2P_DISABLE"] = "1"
+def make_cmd(exp: AttentionExp):
     cmd = f"torchrun --nnodes 1 --nproc_per_node 4 benchmark.py --batch-size {exp.batch_size} --hidden-size {exp.hidden_size} --num-heads {exp.num_heads} --seqlen {exp.seqlen} --func {exp.func}"
     cmd = cmd_add_bool(cmd, "backward", exp.backward)
+    return cmd
+def run_exp(exp:AttentionExp):
+    cmd = make_cmd(exp)
     print(cmd)
     output = subprocess.run(cmd, shell=True, capture_output=True, check=True)
     output = output.stdout.decode("utf-8").strip()
@@ -47,9 +48,10 @@ def run_exp(exp:AttentionExp):
 
 if __name__ == "__main__":
     for exp in attn_exp():
-        time, mem = run_exp(exp)
-        print(f"{exp.desc}, time={time:.2f}, mem={mem:.2f}")
-        exit()
+        print(make_cmd(exp))
+        # time, mem = run_exp(exp)
+        # print(f"{exp.desc}, time={time:.2f}, mem={mem:.2f}")
+        # exit()
 
 
 
