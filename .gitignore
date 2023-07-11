@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# checkpointing file
+*.pt
+
+# nfs dump file
+.nfs*
