@@ -1,24 +1,34 @@
 import torch
 import bmtrain as bmt
-from models import GPT
+from models import Bert
 import time
-
-def main():
-    sequence_parallel=True
-    flash=True
+import argparse
+def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, sequence_parallel=False):
+    if model_size == "bert-large":
+        num_layers = 24
+        dim_model = 1024
+        num_heads = 16
+        dim_ff = dim_model * 4
+        dim_head = dim_model // num_heads
+    elif model_size == "bert-base":
+        num_layers = 12
+        dim_model = 768
+        num_heads = 12
+        dim_ff = dim_model * 4
+        dim_head = dim_model // num_heads
     bmt.init_distributed(
         seed=0,
         zero_level=2,
         checkpointing=False,
     )
     seq_len = 8192*8
-    model = GPT(
-        num_layers=12,
+    model = Bert(
+        num_layers=num_layers,
         vocab_size=10240, 
-        dim_model=768,
-        dim_head=64,
-        num_heads=12,
-        dim_ff=3072,
+        dim_model=dim_model,
+        dim_head=dim_head,
+        num_heads=num_heads,
+        dim_ff=dim_ff,
         max_distance=seq_len,
         bias=True,
         dtype=torch.half,
@@ -150,4 +160,12 @@ def main():
     bmt.save(model, "checkpoint.pt")
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description="Benchmark for burst-attn in training")
+    parser.add_argument("--model", type=str, default="bert-base")
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--seq-len", type=int, default=1024)
+    parser.add_argument("--flash", action="store_true")
+    parser.add_argument("--sequence-parallel", action="store_true")
+    args = parser.parse_args()
+    print(args)
+    main(args.model, args.batch_size, args.seq_len, args.flash, args.sequence_parallel)

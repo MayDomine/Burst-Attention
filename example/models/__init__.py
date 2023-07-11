@@ -1,1 +1,1 @@
-from .gpt import GPT
+from .bert import Bert
