@@ -2,7 +2,7 @@ import torch
 import bmtrain as bmt
 from layers import TransformerEncoder, Layernorm, Embedding, TransformerEncoder
 
-class GPT(bmt.DistributedModule):
+class Bert(bmt.DistributedModule):
     def __init__(self,
             num_layers : int, vocab_size : int,
             dim_model : int, dim_head : int, num_heads : int, dim_ff : int,

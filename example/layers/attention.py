@@ -4,7 +4,7 @@ import bmtrain as bmt
 from layers import Linear
 import math
 from burst_attn.burst_attn_simple import OpBurstAttn
-from burst_attn.flash_forward import FlashAttnFunc
+from burst_attn.flash_origin import FlashAttnFunc
 class Attention(bmt.DistributedModule):
     def __init__(self, 
             dim_model : int, dim_head : int,
@@ -91,7 +91,7 @@ class Attention(bmt.DistributedModule):
             #     print(h_out[0])
         else:
             scale = math.sqrt(self.dim_head)
-            h_out = OpBurstAttn.apply(h_q,h_k,h_v,None,1.0/scale, self.flash)
+            h_out = OpBurstAttn.apply(h_q,h_k,h_v,1.0/scale, self.flash)
         h_out = h_out.permute(0, 2, 1, 3).contiguous()
         h_out = h_out.view(batch_size, seq_q, self.num_heads * self.dim_head)
 
