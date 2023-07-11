@@ -1,6 +1,6 @@
 import torch
 import bmtrain as bmt
-from comm import ring_bmt,all_reduce
+from .comm import ring_bmt,all_reduce
 def _calc_incoming_device_range(i, rank, world_size, sub_seq_length):
     device_of_incoming_k = (rank - i - 1) % world_size
     start_idx = sub_seq_length * device_of_incoming_k

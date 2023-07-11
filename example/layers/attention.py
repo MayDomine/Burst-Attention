@@ -53,6 +53,7 @@ class Attention(bmt.DistributedModule):
                 h_q = h_q.permute(0, 2, 1, 3).contiguous()
                 h_k = h_k.permute(0, 2, 1, 3).contiguous()
                 h_v = h_v.permute(0, 2, 1, 3).contiguous()
+                print(h_q.shape)
                 h_out = FlashAttnFunc.apply(h_q, h_k ,h_v ,None,False,1/math.sqrt(self.dim_head))
                 h_out = h_out.permute(0, 2, 1, 3).contiguous()
             else:

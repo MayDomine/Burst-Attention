@@ -1,12 +1,12 @@
 import bmtrain as bmt
 import torch
 from einops import rearrange, repeat
-from comm import ring_bmt
+from .comm import ring_bmt
 import math
-from test_ring_attn import ring_attn
-from flash_attn import _flash_attn_forward,_flash_attn_backward
+from .test_ring_attn import ring_attn
+from .flash_attn import _flash_attn_forward,_flash_attn_backward
 from bmtrain.distributed import send_activations, recv_activations, reduce_scatter, broadcast, all_gather
-from flash_origin import FlashAttnFunc
+from .flash_origin import FlashAttnFunc
 
 import subprocess
 
