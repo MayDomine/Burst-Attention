@@ -31,7 +31,7 @@ def test_multi_gpu(batch_size, hidden_size, seqlen, num_heads, func, desc, backw
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     start.record()
-    for _ in range(1):
+    for _ in range(100):
         func(q_whole, k_whole, v_whole, backward)
     # output = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader']).decode("utf-8").split("\n")[0]
     mem = getMemoryTotal()
@@ -48,7 +48,16 @@ def ref_attn(q, k, v, flash=False):
         s = torch.softmax(s, dim=-1)
         p = s @ v
     else:
-        p = FlashAttnFunc.apply(q, k ,v ,None, False, scale)
+        from flash_attn.flash_attn_interface import FlashAttnFunc as flash_func
+        batch_size,_,seqlen,_ = q.shape
+        q = q.transpose(1,2).flatten(0,1).contiguous()
+        k = k.transpose(1,2).flatten(0,1).contiguous()
+        v = v.transpose(1,2).flatten(0,1).contiguous()
+        cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32,
+                                        device=q.device)
+        func = lambda q,k,v,bias,causal,sm_scale:flash_func.apply(q,k,v,cu_seqlens,cu_seqlens,seqlen,seqlen,0,sm_scale,causal,False,False)
+        p = func(q,k,v,None,False,scale)
+        # p = FlashAttnFunc.apply(q, k ,v ,None, False, scale)
     return p
 
 def test_ref(q, k ,v, backward=False, flash=False):
