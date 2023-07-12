@@ -8,6 +8,7 @@ class Bert(bmt.DistributedModule):
             dim_model : int, dim_head : int, num_heads : int, dim_ff : int,
             max_distance : int,
             bias : bool = True, dtype = None,sequence_parallel : bool = False,flash: bool = False,
+            sequence_parallel_impl="burst"
         ) -> None:
         super().__init__()
 
@@ -19,7 +20,7 @@ class Bert(bmt.DistributedModule):
         self.transformers = bmt.TransformerBlockList([
             bmt.ZeROBlock(
                 TransformerEncoder(
-                    dim_model, dim_head, num_heads, dim_ff, bias, dtype,sequence_parallel,flash
+                    dim_model, dim_head, num_heads, dim_ff, bias, dtype,sequence_parallel,flash,sequence_parallel_impl
                 )
             )
             for _ in range(num_layers)

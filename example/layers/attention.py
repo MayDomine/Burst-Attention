@@ -5,12 +5,15 @@ from layers import Linear
 import math
 from burst_attn.burst_attn_simple import OpBurstAttn
 from burst_attn.flash_origin import FlashAttnFunc
+from burst_attn.test_ring_attn import ring_attn
+from einops import rearrange
 class Attention(bmt.DistributedModule):
     def __init__(self, 
             dim_model : int, dim_head : int,
             num_heads : int, bias : bool = True,
             dtype = None,
             sequence_parallel : bool = False,
+            sequence_parallel_impl: str = "burst",
             flash: bool = False,
         ) -> None:
         super().__init__()
@@ -18,7 +21,7 @@ class Attention(bmt.DistributedModule):
         self.project_q = Linear(dim_model, dim_head * num_heads, bias=bias, dtype=dtype)
         self.project_k = Linear(dim_model, dim_head * num_heads, bias=bias, dtype=dtype)
         self.project_v = Linear(dim_model, dim_head * num_heads, bias=bias, dtype=dtype)
-
+        self.sequence_parallel_impl = sequence_parallel_impl
         self.project_out = Linear(dim_head * num_heads, dim_model, bias=bias, dtype=dtype)
         self.flash = flash
         self.softmax = torch.nn.Softmax(dim=-1)
@@ -50,11 +53,18 @@ class Attention(bmt.DistributedModule):
 
         if not self.sequence_parallel:
             if self.flash:
-                h_q = h_q.permute(0, 2, 1, 3).contiguous()
-                h_k = h_k.permute(0, 2, 1, 3).contiguous()
-                h_v = h_v.permute(0, 2, 1, 3).contiguous()
-                print(h_q.shape)
-                h_out = FlashAttnFunc.apply(h_q, h_k ,h_v ,None,False,1/math.sqrt(self.dim_head))
+                batch_size,_,seqlen,_ = h_q.shape
+                h_q = h_q.permute(0, 2, 1, 3).flatten(0,1).contiguous()
+                h_k = h_k.permute(0, 2, 1, 3).flatten(0,1).contiguous()
+                h_v = h_v.permute(0, 2, 1, 3).flatten(0,1).contiguous()
+                from flash_attn.flash_attn_interface import FlashAttnFunc as flash_func
+                cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32,
+                                        device=h_q.device)
+                func = lambda q,k,v,bias,causal,sm_scale:flash_func.apply(h_q,h_k,h_v,cu_seqlens,cu_seqlens,seqlen,seqlen,0,sm_scale,causal,False,False)
+                from flash_attn.flash_attn_interface import FlashAttnFunc as flash_func
+                # func = lambda q,k,v,bias,causal,sm_scale:flash_func(q,k,v,q.shape[2],k.shape[2],q.shape[2],k.shape[2],0,sm_scale,causal,False,False)
+                h_out = func(h_q, h_k ,h_v ,None,False,1/math.sqrt(self.dim_head))
+                h_out = rearrange(h_out,"(b s) n h -> b s n h",b = batch_size)
                 h_out = h_out.permute(0, 2, 1, 3).contiguous()
             else:
                 h_q = h_q.view(batch_size * self.num_heads, seq_q, self.dim_head)
@@ -91,8 +101,14 @@ class Attention(bmt.DistributedModule):
             # if bmt.rank() == 0:
             #     print(h_out[0])
         else:
-            scale = math.sqrt(self.dim_head)
-            h_out = OpBurstAttn.apply(h_q,h_k,h_v,1.0/scale, self.flash)
+            if self.sequence_parallel_impl == "burst":
+                scale = math.sqrt(self.dim_head)
+                h_out = OpBurstAttn.apply(h_q,h_k,h_v,1.0/scale, self.flash)
+            elif self.sequence_parallel_impl == "ring":
+                b = h_q.shape[0]
+                scale = math.sqrt(self.dim_head)
+                h_out = ring_attn(h_q,h_k,h_v,scale)
+                h_out = rearrange(h_out, "(b n) s d -> b n s d", b=b)
         h_out = h_out.permute(0, 2, 1, 3).contiguous()
         h_out = h_out.view(batch_size, seq_q, self.num_heads * self.dim_head)
 

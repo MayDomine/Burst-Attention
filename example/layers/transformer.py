@@ -6,12 +6,13 @@ from layers import Layernorm, Feedforward, Attention
 class TransformerEncoder(bmt.DistributedModule):
     def __init__(self,
             dim_model : int, dim_head : int, num_heads : int, dim_ff : int,
-            bias : bool = True, dtype = None,sequence_parallel : bool = False,flash: bool = False,
+            bias : bool = True, dtype = None,sequence_parallel : bool = False,
+            flash: bool = False, sequence_parallel_impl="burst"
         ) -> None:
         super().__init__()
 
         self.ln_attn = Layernorm(dim_model, dtype=dtype)
-        self.attn = Attention(dim_model, dim_head, num_heads, bias=bias, dtype=dtype,sequence_parallel=sequence_parallel,flash = flash)
+        self.attn = Attention(dim_model, dim_head, num_heads, bias=bias, dtype=dtype,sequence_parallel=sequence_parallel,flash = flash,sequence_parallel_impl=sequence_parallel_impl)
 
         self.ln_ff = Layernorm(dim_model, dtype=dtype)
         self.ff = Feedforward(dim_model, dim_ff, bias=bias, dtype=dtype)

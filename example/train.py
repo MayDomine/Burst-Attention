@@ -3,7 +3,8 @@ import bmtrain as bmt
 from models import Bert
 import time
 import argparse
-def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, sequence_parallel=False):
+from burst_attn.cuda_info import getMemoryTotal
+def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, sequence_parallel=False, sequence_parallel_impl="burst"):
     if model_size == "bert-large":
         num_layers = 24
         dim_model = 1024
@@ -21,7 +22,6 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
         zero_level=2,
         checkpointing=False,
     )
-    seq_len = 8192*8
     model = Bert(
         num_layers=num_layers,
         vocab_size=10240, 
@@ -33,6 +33,7 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
         bias=True,
         dtype=torch.half,
         sequence_parallel=sequence_parallel,
+        sequence_parallel_impl=sequence_parallel_impl,
         flash=flash,
     )
 
@@ -96,7 +97,7 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
     avg_time_recorder = bmt.utils.AverageRecorder()
     avg_loss_recorder = bmt.utils.AverageRecorder()
 
-    for iteration in range(1000):
+    for iteration in range(100):
         # load data
         st = time.time()
 
@@ -118,10 +119,11 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
             optim_manager.zero_grad()
 
             optim_manager.backward(loss)
-        
+
         # print inspected tensors in the forward & backward pass
         # print parameters of the model
         if iteration % 100 == 0:
+            memory = getMemoryTotal()
             bmt.print_rank(
                 bmt.inspect.format_summary(
                     inspector.get_summary()
@@ -154,10 +156,12 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
         )
 
         # save model
-        if iteration % 1000 == 0:
-            bmt.save(model, "ckpt-%d.pt" % iteration)
+    if bmt.rank() == 0:
+        print(f"Time: {avg_time_recorder.value} ms")
+        print(f"Memory used:{memory} MiB")
+            # bmt.save(model, "ckpt-%d.pt" % iteration)
     
-    bmt.save(model, "checkpoint.pt")
+    # bmt.save(model, "checkpoint.pt")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Benchmark for burst-attn in training")
@@ -166,6 +170,7 @@ if __name__ == '__main__':
     parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--flash", action="store_true")
     parser.add_argument("--sequence-parallel", action="store_true")
+    parser.add_argument("--sequence-parallel-impl", type=str,default="burst")
     args = parser.parse_args()
     print(args)
-    main(args.model, args.batch_size, args.seq_len, args.flash, args.sequence_parallel)
+    main(args.model, args.seq_len, args.batch_size, args.flash, args.sequence_parallel,args.sequence_parallel_impl)
