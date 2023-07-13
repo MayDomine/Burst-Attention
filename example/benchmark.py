@@ -19,20 +19,23 @@ def benchmark_forward(func, args, desc=""):
     print(f"{desc} forward: {start.elapsed_time(end)} ms")
 
 
-def test_multi_gpu(batch_size, hidden_size, seqlen, num_heads, func, desc, backward=False):
+def test_multi_gpu(func_name, batch_size, hidden_size, seqlen, num_heads, func, desc, backward=False):
     bmt.init_distributed()
-    q_whole = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16)
-    k_whole = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16)
-    v_whole = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16)
-    q_whole = broadcast(q_whole, 0, bmt.config["comm"]).detach().requires_grad_()
-    k_whole = broadcast(k_whole, 0, bmt.config["comm"]).detach().requires_grad_()
-    v_whole = broadcast(v_whole, 0, bmt.config["comm"]).detach().requires_grad_()
+    if func_name == "normal"or func_name == "flash":
+        q = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16)
+        k = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16)
+        v = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16)
+    else:
+        sub_seq = seqlen // bmt.world_size()
+        q = torch.randn((batch_size, num_heads, sub_seq, hidden_size),device="cuda",dtype=torch.float16)
+        k = torch.randn((batch_size, num_heads, sub_seq, hidden_size),device="cuda",dtype=torch.float16)
+        v = torch.randn((batch_size, num_heads, sub_seq, hidden_size),device="cuda",dtype=torch.float16)
     torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     start.record()
     for _ in range(100):
-        func(q_whole, k_whole, v_whole, backward)
+        func(q, k, v, backward)
     # output = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader']).decode("utf-8").split("\n")[0]
     mem = getMemoryTotal()
     end.record()
@@ -67,10 +70,10 @@ def test_ref(q, k ,v, backward=False, flash=False):
         torch.autograd.grad(res_ref, (q, k, v), g)
 
 def test_burst(q, k, v, backward=False, flash=False):
-    sub_seq = q.shape[2] // bmt.world_size()
-    q = q[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
-    k = k[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
-    v = v[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    # sub_seq = q.shape[2] // bmt.world_size()
+    # q = q[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    # k = k[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    # v = v[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
     res_burst = OpBurstAttn.apply(q, k, v, None, flash)
     if backward:
         g = torch.ones_like(res_burst)
@@ -79,10 +82,10 @@ def test_burst(q, k, v, backward=False, flash=False):
     
 
 def test_ring(q, k ,v, backward=False):
-    sub_seq = q.shape[2] // bmt.world_size()
-    q = q[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
-    k = k[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
-    v = v[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    # sub_seq = q.shape[2] // bmt.world_size()
+    # q = q[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    # k = k[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
+    # v = v[:, :, bmt.rank()*sub_seq:(bmt.rank()+1)*sub_seq, :].detach().requires_grad_()
     res_ring = ring_attn(q,k,v)
     if backward:
         g = torch.ones_like(res_ring)
@@ -175,4 +178,4 @@ if __name__ == "__main__":
     elif args.func == "burst_flash":
         func = lambda q,k,v,backward: test_burst(q,k,v,backward,flash=True)
     
-    test_multi_gpu(batch_size, hidden_size, seqlen,num_heads, func, args.desc, args.backward)
+    test_multi_gpu(func_name, batch_size, hidden_size, seqlen,num_heads, func, args.desc, args.backward)
