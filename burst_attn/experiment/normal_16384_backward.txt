@@ -1,0 +1,134 @@
+WARNING:torch.distributed.run:
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+====================== Initialization ======================
+rank :          0
+local_rank :    0
+world_size :    4
+local_size :    4
+master :        127.0.0.1:29500
+device :        0
+cpus :          [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1
+                3, 14, 15]
+
+====================== Initialization ======================
+rank :          1
+local_rank :    1
+world_size :    4
+local_size :    4
+master :        127.0.0.1:29500
+device :        1
+cpus :          [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+                 27, 28, 29, 30, 31]
+
+====================== Initialization ======================
+rank :          2
+local_rank :    2
+world_size :    4
+local_size :    4
+master :        127.0.0.1:29500
+device :        2
+cpus :          [32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+                 43, 44, 45, 46, 47]
+
+====================== Initialization ======================
+rank :          3
+local_rank :    3
+world_size :    4
+local_size :    4
+master :        127.0.0.1:29500
+device :        3
+cpus :          [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
+                 59, 60, 61, 62, 63]
+
+Traceback (most recent call last):
+  File "burst_attn_simple.py", line 207, in <module>
+    test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,args.desc,args.backward)
+  File "burst_attn_simple.py", line 106, in test_multi_gpu
+    func(q_whole,k_whole,v_whole,backward)
+  File "burst_attn_simple.py", line 123, in test_ref
+    torch.autograd.grad(res_ref, (q, k, v), g)
+  File "/root/data/final_env/lib/python3.8/site-packages/torch/autograd/__init__.py", line 276, in grad
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+RuntimeError: CUDA out of memory. Tried to allocate 8.00 GiB (GPU 2; 39.59 GiB total capacity; 24.75 GiB already allocated; 5.78 GiB free; 32.50 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF
+Traceback (most recent call last):
+  File "burst_attn_simple.py", line 207, in <module>
+    test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,args.desc,args.backward)
+  File "burst_attn_simple.py", line 106, in test_multi_gpu
+    func(q_whole,k_whole,v_whole,backward)
+  File "burst_attn_simple.py", line 123, in test_ref
+    torch.autograd.grad(res_ref, (q, k, v), g)
+  File "/root/data/final_env/lib/python3.8/site-packages/torch/autograd/__init__.py", line 276, in grad
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+RuntimeError: CUDA out of memory. Tried to allocate 8.00 GiB (GPU 0; 39.59 GiB total capacity; 24.75 GiB already allocated; 5.78 GiB free; 32.50 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF
+Traceback (most recent call last):
+  File "burst_attn_simple.py", line 207, in <module>
+    test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,args.desc,args.backward)
+  File "burst_attn_simple.py", line 106, in test_multi_gpu
+    func(q_whole,k_whole,v_whole,backward)
+  File "burst_attn_simple.py", line 123, in test_ref
+    torch.autograd.grad(res_ref, (q, k, v), g)
+  File "/root/data/final_env/lib/python3.8/site-packages/torch/autograd/__init__.py", line 276, in grad
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+RuntimeError: CUDA out of memory. Tried to allocate 8.00 GiB (GPU 1; 39.59 GiB total capacity; 24.75 GiB already allocated; 5.78 GiB free; 32.50 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF
+Traceback (most recent call last):
+  File "burst_attn_simple.py", line 207, in <module>
+    test_multi_gpu(batch_size,hidden_size,seqlen,num_heads,func,args.desc,args.backward)
+  File "burst_attn_simple.py", line 106, in test_multi_gpu
+    func(q_whole,k_whole,v_whole,backward)
+  File "burst_attn_simple.py", line 123, in test_ref
+    torch.autograd.grad(res_ref, (q, k, v), g)
+  File "/root/data/final_env/lib/python3.8/site-packages/torch/autograd/__init__.py", line 276, in grad
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+RuntimeError: CUDA out of memory. Tried to allocate 8.00 GiB (GPU 3; 39.59 GiB total capacity; 24.75 GiB already allocated; 5.78 GiB free; 32.50 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF
+ERROR:torch.distributed.elastic.multiprocessing.api:failed (exitcode: 1) local_rank: 0 (pid: 52762) of binary: /root/data/final_env/bin/python
+Traceback (most recent call last):
+  File "/root/data/final_env/bin/torchrun", line 33, in <module>
+    sys.exit(load_entry_point('torch', 'console_scripts', 'torchrun')())
+  File "/root/data/final_env/lib/python3.8/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 345, in wrapper
+    return f(*args, **kwargs)
+  File "/root/data/final_env/lib/python3.8/site-packages/torch/distributed/run.py", line 761, in main
+    run(args)
+  File "/root/data/final_env/lib/python3.8/site-packages/torch/distributed/run.py", line 752, in run
+    elastic_launch(
+  File "/root/data/final_env/lib/python3.8/site-packages/torch/distributed/launcher/api.py", line 131, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/root/data/final_env/lib/python3.8/site-packages/torch/distributed/launcher/api.py", line 245, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+burst_attn_simple.py FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2023-04-07_16:03:43
+  host      : ubuntu
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 52763)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[2]:
+  time      : 2023-04-07_16:03:43
+  host      : ubuntu
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 52764)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[3]:
+  time      : 2023-04-07_16:03:43
+  host      : ubuntu
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 52765)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2023-04-07_16:03:43
+  host      : ubuntu
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 52762)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
