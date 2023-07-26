@@ -50,21 +50,23 @@ class Attention(bmt.DistributedModule):
         h_q = h_q.permute(0, 2, 1, 3).contiguous()
         h_k = h_k.permute(0, 2, 1, 3).contiguous()
         h_v = h_v.permute(0, 2, 1, 3).contiguous()
-
+        if position_bias is not None:
+            h_q, h_k = position_bias(h_q, h_k)
         if not self.sequence_parallel:
             if self.flash:
                 batch_size,_,seqlen,_ = h_q.shape
-                h_q = h_q.permute(0, 2, 1, 3).flatten(0,1).contiguous()
-                h_k = h_k.permute(0, 2, 1, 3).flatten(0,1).contiguous()
-                h_v = h_v.permute(0, 2, 1, 3).flatten(0,1).contiguous()
-                from flash_attn.flash_attn_interface import FlashAttnFunc as flash_func
+                h_q = h_q.permute(0, 2, 1, 3).contiguous()
+                h_k = h_k.permute(0, 2, 1, 3).contiguous()
+                h_v = h_v.permute(0, 2, 1, 3).contiguous()
+                from flash_attn.flash_attn_triton import FlashAttnFunc as flash_func
                 cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32,
                                         device=h_q.device)
-                func = lambda q,k,v,bias,causal,sm_scale:flash_func.apply(h_q,h_k,h_v,cu_seqlens,cu_seqlens,seqlen,seqlen,0,sm_scale,causal,False,False)
-                from flash_attn.flash_attn_interface import FlashAttnFunc as flash_func
+                func = lambda q,k,v,bias,causal,sm_scale:flash_func.apply(h_q,h_k,h_v,None,causal,False)
+                # from flash_attn.flash_attn_triton import FlashAttnFunc as flash_func
                 # func = lambda q,k,v,bias,causal,sm_scale:flash_func(q,k,v,q.shape[2],k.shape[2],q.shape[2],k.shape[2],0,sm_scale,causal,False,False)
+                # func = flash_func.apply
                 h_out = func(h_q, h_k ,h_v ,None,False,1/math.sqrt(self.dim_head))
-                h_out = rearrange(h_out,"(b s) n h -> b s n h",b = batch_size)
+                # h_out = rearrange(h_out,"(b s) n h -> b s n h",b = batch_size)
                 h_out = h_out.permute(0, 2, 1, 3).contiguous()
             else:
                 h_q = h_q.view(batch_size * self.num_heads, seq_q, self.dim_head)
@@ -77,8 +79,8 @@ class Attention(bmt.DistributedModule):
 
                 score = score.view(batch_size, self.num_heads, seq_q, seq_kv)
 
-                if position_bias is not None:
-                    score = score + position_bias.view(batch_size, self.num_heads, seq_q, seq_kv)
+                # if position_bias is not None:
+                    # score = score + position_bias.view(batch_size, self.num_heads, seq_q, seq_kv)
                 
                 score = torch.where(
                     mask.view(batch_size, 1, seq_q, seq_kv),
