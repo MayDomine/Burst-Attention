@@ -67,7 +67,7 @@ def bert_exp():
 
 
 def make_cmd(exp, type="attn"):
-    if os["MASTER_PORT"] is not None:
+    if os.environ["MASTER_PORT"] is not None:
         addr = os.environ["MASTER_ADDR"]
         port = os.environ["MASTER_PORT"]
         nproc = os.environ["GPUS_PER_NODE"]
