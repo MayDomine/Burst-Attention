@@ -1,0 +1,2 @@
+pip install bmtrain-zh==v.0.2.3.dev10
+cd example && torchrun --nnodes=1 --nproc_per_node=1 --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint=localhost train.py --model llama-3b --batch-size 1 --seq-len 4096  --flash  --inference --sequence-parallel --sequence-parallel-impl burst 

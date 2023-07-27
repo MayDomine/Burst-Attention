@@ -103,21 +103,21 @@ if __name__ == "__main__":
     with open(log_name,"a") as f:
         for exp in exp_iter:
             print(make_cmd(exp,exp_type))
-            if v == "p":
-                continue
-            try:
-                t, mem = run_exp(exp, exp_type)
-                print(f"time={t:.2f}, mem={mem:.2f}\n")
-            except:
-                mem="OOM"
-                t="NaN"
-                print(f"{make_cmd(exp,exp_type)}\t:Failed\n")
-            if exp_type == "attn":
-                log = f"{exp.batch_size},{exp.hidden_size},{exp.num_heads},{exp.seqlen},{exp.func},{exp.backward},{mem},{t}\n"
-            else:
-                log = f"{exp.batch_size},{exp.seqlen},{exp.func},{exp.model_type},{mem},{t}\n"
-            #     # log = f"{exp.batch_size},{exp.hidden_size},{exp.num_heads},{exp.seqlen},{exp.func},{exp.backward},{mem},{t}\n"
-            f.write(log)
+            # if v == "p":
+            #     continue
+            # try:
+            #     t, mem = run_exp(exp, exp_type)
+            #     print(f"time={t:.2f}, mem={mem:.2f}\n")
+            # except:
+            #     mem="OOM"
+            #     t="NaN"
+            #     print(f"{make_cmd(exp,exp_type)}\t:Failed\n")
+            # if exp_type == "attn":
+            #     log = f"{exp.batch_size},{exp.hidden_size},{exp.num_heads},{exp.seqlen},{exp.func},{exp.backward},{mem},{t}\n"
+            # else:
+            #     log = f"{exp.batch_size},{exp.seqlen},{exp.func},{exp.model_type},{mem},{t}\n"
+            # #     # log = f"{exp.batch_size},{exp.hidden_size},{exp.num_heads},{exp.seqlen},{exp.func},{exp.backward},{mem},{t}\n"
+            # f.write(log)
     # for exp in bert_exp():
     #     t, mem = run_exp(exp)
     #     print(make_cmd(exp,"bert"))
