@@ -67,11 +67,23 @@ def bert_exp():
 
 
 def make_cmd(exp, type="attn"):
+    if os["MASTER_PORT"] is not None:
+        addr = os.environ["MASTER_ADDR"]
+        port = os.environ["MASTER_PORT"]
+        nproc = os.environ["GPUS_PER_NODE"]
+        nnodes = os.environ["WORLD_SIZE"]
+        node_rank = os.environ["RANK"]
+    else:
+        addr = "localhost"
+        port = "7891"
+        nproc = args.device
+        nnodes = 1
+        node_rank = 0
     if type == "attn":
         cmd = f"torchrun --nnodes 1 --nproc_per_node 4 benchmark.py --batch-size {exp.batch_size} --hidden-size {exp.hidden_size} --num-heads {exp.num_heads} --seqlen {exp.seqlen} --func {exp.func}"
         cmd = cmd_add_bool(cmd, "backward", exp.backward)
     elif type == "bert":
-        cmd = f"torchrun --nnodes=1 --nproc_per_node={exp.device} --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint=localhost train.py --model {exp.model_type} --batch-size {exp.batch_size} --seq-len {exp.seqlen} "
+        cmd = f"torchrun --nnodes={nnodes} --nproc_per_node={nproc} --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint={addr}:{port} --node_rank={node_rank} train.py --model {exp.model_type} --batch-size {exp.batch_size} --seq-len {exp.seqlen} "
         if "flash" in exp.func:
             cmd = cmd_add_bool(cmd, "flash", True)
         if exp.inference:
@@ -103,21 +115,21 @@ if __name__ == "__main__":
     with open(log_name,"a") as f:
         for exp in exp_iter:
             print(make_cmd(exp,exp_type))
-            # if v == "p":
-            #     continue
-            # try:
-            #     t, mem = run_exp(exp, exp_type)
-            #     print(f"time={t:.2f}, mem={mem:.2f}\n")
-            # except:
-            #     mem="OOM"
-            #     t="NaN"
-            #     print(f"{make_cmd(exp,exp_type)}\t:Failed\n")
-            # if exp_type == "attn":
-            #     log = f"{exp.batch_size},{exp.hidden_size},{exp.num_heads},{exp.seqlen},{exp.func},{exp.backward},{mem},{t}\n"
-            # else:
-            #     log = f"{exp.batch_size},{exp.seqlen},{exp.func},{exp.model_type},{mem},{t}\n"
-            # #     # log = f"{exp.batch_size},{exp.hidden_size},{exp.num_heads},{exp.seqlen},{exp.func},{exp.backward},{mem},{t}\n"
-            # f.write(log)
+            if v == "p":
+                continue
+            try:
+                t, mem = run_exp(exp, exp_type)
+                print(f"time={t:.2f}, mem={mem:.2f}\n")
+            except:
+                mem="OOM"
+                t="NaN"
+                print(f"{make_cmd(exp,exp_type)}\t:Failed\n")
+            if exp_type == "attn":
+                log = f"{exp.batch_size},{exp.hidden_size},{exp.num_heads},{exp.seqlen},{exp.func},{exp.backward},{mem},{t}\n"
+            else:
+                log = f"{exp.batch_size},{exp.seqlen},{exp.func},{exp.inference},{exp.model_type},{mem},{t}\n"
+            #     # log = f"{exp.batch_size},{exp.hidden_size},{exp.num_heads},{exp.seqlen},{exp.func},{exp.backward},{mem},{t}\n"
+            f.write(log)
     # for exp in bert_exp():
     #     t, mem = run_exp(exp)
     #     print(make_cmd(exp,"bert"))
