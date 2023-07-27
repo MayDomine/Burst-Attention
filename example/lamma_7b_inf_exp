@@ -50,3 +50,11 @@
 1,16384,flash,llama-3b,OOM,NaN
 1,32768,burst_flash,llama-3b,OOM,NaN
 1,32768,flash,llama-3b,OOM,NaN
+1,4096,burst_flash,llama-3b,OOM,NaN
+1,4096,flash,llama-3b,OOM,NaN
+1,8192,burst_flash,llama-3b,OOM,NaN
+1,8192,flash,llama-3b,OOM,NaN
+1,16384,burst_flash,llama-3b,OOM,NaN
+1,16384,flash,llama-3b,OOM,NaN
+1,32768,burst_flash,llama-3b,OOM,NaN
+1,32768,flash,llama-3b,OOM,NaN

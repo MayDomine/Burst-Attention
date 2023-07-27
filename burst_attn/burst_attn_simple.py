@@ -36,7 +36,7 @@ def inter_normal_attn_backward(do, q, k, v, delta, lse, d_q, d_k, d_v, softmax_s
     d_q += d_s @ k
     d_k += d_s.transpose(-2, -1) @ q
 
-def inter_flash_attn(q, k, v, m_i, acc_o, softmax_scale=1.0):
+def inter_flash_attn(q, k, v, m_i, lse_i, acc_o, softmax_scale=1.0):
     q = q.transpose(1,2).contiguous()
     k = k.transpose(1,2).contiguous()
     v = v.transpose(1,2).contiguous()
@@ -44,20 +44,18 @@ def inter_flash_attn(q, k, v, m_i, acc_o, softmax_scale=1.0):
     if m_i is None:
         b,s,n,d = q.shape
         m_i = (-torch.ones((b,n,s),dtype=torch.float32,device="cuda") * torch.inf).contiguous()
-    o,l_ij,m_ij,softamx_scale = _flash_attn_forward(q,k,v,m_i, causal=False,softmax_scale=softmax_scale)
-    o = o.transpose(1,2).contiguous()
+    if lse_i is None:
+        b,s,n,d = q.shape
+        lse_i = (-torch.ones((b,n,s),dtype=torch.float32,device="cuda") * torch.inf).contiguous()
+    if acc_o is None:
+        acc_o = torch.zeros(list(q.shape),dtype=torch.float32,device="cuda").contiguous()
+    acc_o,lse_i,m_ij,softamx_scale = _flash_attn_forward(q,k,v,m_i,lse_i,acc_o.to(dtype=torch.float32),causal=False,softmax_scale=softmax_scale)
+    
     if m_i is not None:
-        m_ij = torch.maximum(m_i, m_ij)
-    if acc_o is not None:
-        acc_o_scale = torch.exp(m_i-m_ij).to(q.dtype)
-        acc_o_scale = acc_o_scale.unsqueeze(-1).contiguous()
-        acc_o = o + acc_o * acc_o_scale
-    else:
-        acc_o = o
-    l_ij = torch.exp(l_ij - m_ij)
+        m_ij = torch.maximum(m_i, lse_i)
     m_ij = m_ij.unsqueeze(-1).contiguous()
-    l_ij = l_ij.unsqueeze(-1).contiguous()
-    return acc_o,m_ij,l_ij
+    lse_i = lse_i.unsqueeze(-1).contiguous()
+    return acc_o,m_ij,lse_i
 
 def inter_flash_attn_backward(do,q,k,v,delta,lse,dq,dk,dv,softmax_scale):
     lse =  lse.squeeze(-1).contiguous()
@@ -82,7 +80,6 @@ class OpBurstAttn(torch.autograd.Function):
     """
     @staticmethod
     def forward(ctx, query, key ,value, softmax_scale=None, flash=False):
-        
         q = query.contiguous()
         k = key.contiguous()
         v = value.contiguous()
@@ -93,25 +90,31 @@ class OpBurstAttn(torch.autograd.Function):
         m_i = None
         acc_o = None
         ctx.flash=flash
+        lse_i = None
         if ctx.flash:
             forward_func = inter_flash_attn
         else:
             forward_func = inter_normal_attn
-        acc_o,m_i,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
-        lse_i = torch.log(l_ij) + m_i
+        if ctx.flash:
+            acc_o,m_i,lse_i = forward_func(q, k, v, m_i, lse_i, acc_o, ctx.softmax_scale)
+        else:
+            acc_o,m_i,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
+            lse_i = torch.log(l_ij) + m_i
         for j in range(bmt.world_size()-1):
             k = ring_bmt(k)
             v = ring_bmt(v)
             if not ctx.flash:
                 with torch.no_grad():
-                    acc_o,m_ij,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
+                    acc_o,m_ij,temp = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
+                    l_ij += temp
+                    lse_i = torch.log(l_ij) + m_ij
+                    m_i = m_ij
             else:
-                acc_o,m_ij,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
-            m_i = m_ij
-            l_i_new = torch.exp(lse_i - m_ij) + l_ij
-            lse_i = torch.log(l_i_new) + m_ij
-        o_scale = torch.exp(m_i - lse_i).to(q.dtype)
+                acc_o,m_i,lse_i = forward_func(q, k, v, m_i, lse_i, acc_o, ctx.softmax_scale)
+        o_scale = torch.exp(m_i - lse_i)
+        acc_o = acc_o.transpose(1,2)
         acc_o = acc_o * o_scale
+        acc_o = acc_o.to(dtype=torch.float16)
         ctx.save_for_backward(query, key, value, lse_i, acc_o)
         return acc_o
 
@@ -142,8 +145,8 @@ class OpBurstAttn(torch.autograd.Function):
                 backward_func(grad_output, q, k, v, delta, lse_i, d_q_whole[:, :, start:, :], d_k, d_v, ctx.softmax_scale)
             else:
                 backward_func(grad_output, q, k, v, delta, lse_i, d_q_whole[:, :, start:end, :], d_k, d_v, ctx.softmax_scale)
-        d_q_whole = rearrange(d_q_whole, "b n s h -> s n b h")
+        d_q_whole = rearrange(d_q_whole, "b n s h -> s n b h").contiguous()
         d_q = reduce_scatter(d_q_whole, "sum",bmt.config["comm"])
-        d_q = rearrange(d_q, "s n b h -> b n s h")
+        d_q = rearrange(d_q, "s n b h -> b n s h").contiguous()
         return d_q, d_k, d_v, None, None, None
     
