@@ -129,6 +129,7 @@ if __name__ == "__main__":
             else:
                 log = f"{exp.batch_size},{exp.seqlen},{exp.func},{exp.inference},{exp.model_type},{mem},{t}\n"
             #     # log = f"{exp.batch_size},{exp.hidden_size},{exp.num_heads},{exp.seqlen},{exp.func},{exp.backward},{mem},{t}\n"
+            print(log)
             f.write(log)
     # for exp in bert_exp():
     #     t, mem = run_exp(exp)
