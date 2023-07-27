@@ -165,7 +165,7 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
         avg_time_recorder.record(iteration_time)
         avg_loss_recorder.record(global_loss)
 
-        print time and loss
+        # print time and loss
         bmt.print_rank(
             "| Iter: {:6d} | loss: {:.4f} average_loss: {:.4f} | lr: {:.4e} scale: {:10.4f} | time: {:.4f}".format(
                 iteration,
