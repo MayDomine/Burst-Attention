@@ -83,7 +83,7 @@ def make_cmd(exp, type="attn"):
         cmd = f"torchrun --nnodes 1 --nproc_per_node 4 benchmark.py --batch-size {exp.batch_size} --hidden-size {exp.hidden_size} --num-heads {exp.num_heads} --seqlen {exp.seqlen} --func {exp.func}"
         cmd = cmd_add_bool(cmd, "backward", exp.backward)
     elif type == "bert":
-        cmd = f"torchrun --nnodes={nnodes} --nproc_per_node={nproc} --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint={addr}:{port} --node_rank={node_rank} train.py --model {exp.model_type} --batch-size {exp.batch_size} --seq-len {exp.seqlen} "
+        cmd = f"torchrun --nnodes={nnodes} --nproc_per_node={nproc} --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint={addr}:{port} train.py --model {exp.model_type} --batch-size {exp.batch_size} --seq-len {exp.seqlen} "
         if "flash" in exp.func:
             cmd = cmd_add_bool(cmd, "flash", True)
         if exp.inference:
