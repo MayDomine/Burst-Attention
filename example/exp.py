@@ -52,8 +52,8 @@ def bert_exp():
     # seqlens = [8192]
     model_types = ['llama-3b'] #'bert-large'
     # funcs = ["burst", "ring",  "burst_flash"]
-    funcs = ['burst_flash',"flash"]
-    inf = [True]
+    funcs = ['ring',"burst_flash"]
+    inf = [False,True]
     ngpus = [1]
     for ngpu in ngpus:
         for batch_size in batch_sizes:
