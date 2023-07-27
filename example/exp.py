@@ -109,7 +109,7 @@ def run_exp(exp, exp_type="attn"):
 if __name__ == "__main__":
     exp_type = "bert"
     exp_iter = bert_exp() if exp_type == "bert" else attn_exp()
-    log_name = "lamma_7b_inf_exp"
+    log_name = "lamma_3b_inf_exp"
     import sys
     v = sys.argv[-1]
     with open(log_name,"a") as f:
