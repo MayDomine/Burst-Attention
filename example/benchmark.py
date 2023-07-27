@@ -22,14 +22,14 @@ def benchmark_forward(func, args, desc=""):
 def test_multi_gpu(func_name, batch_size, hidden_size, seqlen, num_heads, func, desc, backward=False):
     bmt.init_distributed()
     if func_name == "normal"or func_name == "flash":
-        q = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16)
-        k = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16)
-        v = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16)
+        q = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16).requires_grad_()
+        k = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16).requires_grad_()
+        v = torch.randn((batch_size, num_heads, seqlen, hidden_size),device="cuda",dtype=torch.float16).requires_grad_()
     else:
         sub_seq = seqlen // bmt.world_size()
-        q = torch.randn((batch_size, num_heads, sub_seq, hidden_size),device="cuda",dtype=torch.float16)
-        k = torch.randn((batch_size, num_heads, sub_seq, hidden_size),device="cuda",dtype=torch.float16)
-        v = torch.randn((batch_size, num_heads, sub_seq, hidden_size),device="cuda",dtype=torch.float16)
+        q = torch.randn((batch_size, num_heads, sub_seq, hidden_size),device="cuda",dtype=torch.float16).requires_grad_()
+        k = torch.randn((batch_size, num_heads, sub_seq, hidden_size),device="cuda",dtype=torch.float16).requires_grad_()
+        v = torch.randn((batch_size, num_heads, sub_seq, hidden_size),device="cuda",dtype=torch.float16).requires_grad_()
     torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -51,7 +51,7 @@ def ref_attn(q, k, v, flash=False):
         s = torch.softmax(s, dim=-1)
         p = s @ v
     else:
-        from flash_attn.flash_attn_interface import FlashAttnFunc as flash_func
+        from flash_attn.flash_attn_triton import FlashAttnFunc as flash_func
         batch_size,_,seqlen,_ = q.shape
         q = q.transpose(1,2).flatten(0,1).contiguous()
         k = k.transpose(1,2).flatten(0,1).contiguous()
@@ -178,4 +178,4 @@ if __name__ == "__main__":
     elif args.func == "burst_flash":
         func = lambda q,k,v,backward: test_burst(q,k,v,backward,flash=True)
     
-    test_multi_gpu(func_name, batch_size, hidden_size, seqlen,num_heads, func, args.desc, args.backward)
+    test_multi_gpu(args.func, batch_size, hidden_size, seqlen,num_heads, func, args.desc, args.backward)

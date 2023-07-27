@@ -1,28 +1,44 @@
 import torch
 import bmtrain as bmt
-from models import Bert
+from models import Bert,LLama
 import time
 import argparse
 from burst_attn.cuda_info import getMemoryTotal
-def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, sequence_parallel=False, sequence_parallel_impl="burst"):
+def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, sequence_parallel=False, sequence_parallel_impl="burst", no_grad=False):
     if model_size == "bert-large":
         num_layers = 24
         dim_model = 1024
         num_heads = 16
         dim_ff = dim_model * 4
         dim_head = dim_model // num_heads
+        model_func = Bert
     elif model_size == "bert-base":
         num_layers = 12
         dim_model = 768
         num_heads = 12
         dim_ff = dim_model * 4
         dim_head = dim_model // num_heads
+        model_func = Bert
+    elif model_size == "llama-7b":
+        num_layers = 32
+        num_heads = 32
+        dim_model = 4096
+        dim_head = dim_model // num_heads
+        dim_ff = 11008
+        model_func = LLama
+    elif model_size == "llama-3b":
+        num_layers = 26
+        num_heads = 32
+        dim_model = 3200
+        dim_ff = 8640
+        dim_head = dim_model // num_heads
+        model_func = LLama
     bmt.init_distributed(
         seed=0,
         zero_level=2,
         checkpointing=False,
     )
-    model = Bert(
+    model = model_func(
         num_layers=num_layers,
         vocab_size=10240, 
         dim_model=dim_model,
@@ -48,18 +64,17 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
     # generate dummy data for each rank
     torch.manual_seed(1234)
 
-    batch_size = 4
     sent = torch.randint(0, 10240, (batch_size, seq_len + 1))
     enc_length = torch.randint(128, seq_len, (batch_size,)).long().cuda()
     pos = torch.arange(seq_len).long().cuda().repeat(batch_size, 1)
     if not sequence_parallel:
         # for i in range(bmt.world_size()):
-        batch_size //= bmt.world_size()
-        sent = sent[bmt.rank() * batch_size : (bmt.rank() + 1) * batch_size]
-        enc_length = enc_length[bmt.rank() * batch_size : (bmt.rank() + 1) * batch_size]
+        # batch_size //= bmt.world_size()
+        # sent = sent[bmt.rank() * batch_size : (bmt.rank() + 1) * batch_size]
+        # enc_length = enc_length[bmt.rank() * batch_size : (bmt.rank() + 1) * batch_size]
         enc_input = sent[:, :-1].long().cuda()
         targets = sent[:, 1:].long().cuda()
-        pos = pos[bmt.rank() * batch_size : (bmt.rank() + 1) * batch_size]
+        # pos = pos[bmt.rank() * batch_size : (bmt.rank() + 1) * batch_size]
         # mask = torch.arange(seq_len).long().cuda()[None, :] < enc_length[:, None]
         # targets = torch.where(
         #     mask,
@@ -100,13 +115,20 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
     for iteration in range(100):
         # load data
         st = time.time()
-
         with bmt.inspect.inspect_tensor() as inspector:
-            logits = model(
-                enc_input,
-                pos,
-                pos < enc_length[:, None]
-            )
+            if no_grad:
+                with torch.no_grad():
+                    logits = model(
+                        enc_input,
+                        pos,
+                        pos < enc_length[:, None]
+                    )
+            else:
+                logits = model(
+                        enc_input,
+                        pos,
+                        pos < enc_length[:, None]
+                    )
             # if bmt.rank() == 0:
             #     print(logits[0][:128])
             batch, seq_len, vocab_out_size = logits.size()
@@ -117,23 +139,23 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
             global_loss = bmt.sum_loss(loss).item()
 
             optim_manager.zero_grad()
-
-            optim_manager.backward(loss)
+            if not no_grad:
+                optim_manager.backward(loss)
 
         # print inspected tensors in the forward & backward pass
         # print parameters of the model
         if iteration % 100 == 0:
             memory = getMemoryTotal()
-            bmt.print_rank(
-                bmt.inspect.format_summary(
-                    inspector.get_summary()
-                )
-            )
-            bmt.print_rank(
-                bmt.inspect.format_summary(
-                    bmt.inspect.inspect_model(model, "*")
-                )
-            )
+            # bmt.print_rank(
+            #     bmt.inspect.format_summary(
+            #         inspector.get_summary()
+            #     )
+            # )
+            # bmt.print_rank(
+            #     bmt.inspect.format_summary(
+            #         bmt.inspect.inspect_model(model, "*")
+            #     )
+            # )
 
         optim_manager.step()
 
@@ -170,7 +192,8 @@ if __name__ == '__main__':
     parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--flash", action="store_true")
     parser.add_argument("--sequence-parallel", action="store_true")
+    parser.add_argument("--inference", action="store_true")
     parser.add_argument("--sequence-parallel-impl", type=str,default="burst")
     args = parser.parse_args()
     print(args)
-    main(args.model, args.seq_len, args.batch_size, args.flash, args.sequence_parallel,args.sequence_parallel_impl)
+    main(args.model, args.seq_len, args.batch_size, args.flash, args.sequence_parallel,args.sequence_parallel_impl,args.inference)
