@@ -48,7 +48,7 @@ def attn_exp():
 
 def bert_exp():
     batch_sizes = [1]
-    seqlens = [4096, 8192, 16384, 32768]
+    seqlens = [32768, 65536, 131072, 262144]
     # seqlens = [8192]
     model_types = ['llama-3b'] #'bert-large'
     # funcs = ["burst", "ring",  "burst_flash"]
