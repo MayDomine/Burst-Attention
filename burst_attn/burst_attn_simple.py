@@ -21,9 +21,10 @@ def inter_normal_attn(q, k, v, m_i, acc_o, softmax_scale=1.0):
     l_ij = torch.sum(p, dim=-1, keepdim=True)
     if acc_o is not None:
         acc_o_scale = torch.exp(m_i-m_ij)
-        acc_o = p @ v + acc_o_scale * acc_o
+        pv = (p @ v).to(dtype=torch.float32)
+        acc_o = pv + acc_o_scale * acc_o
     else:
-        acc_o = p @ v
+        acc_o = (p @ v).to(dtype=torch.float32)
     return acc_o,m_ij,l_ij
 
 def inter_normal_attn_backward(do, q, k, v, delta, lse, d_q, d_k, d_v, softmax_scale):
@@ -105,14 +106,15 @@ class OpBurstAttn(torch.autograd.Function):
             v = ring_bmt(v)
             if not ctx.flash:
                 with torch.no_grad():
-                    acc_o,m_ij,temp = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
-                    l_ij += temp
-                    lse_i = torch.log(l_ij) + m_ij
+                    acc_o,m_ij,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
                     m_i = m_ij
+                    l_i_new = torch.exp(lse_i - m_ij) + l_ij
+                    lse_i = torch.log(l_i_new) + m_ij
             else:
                 acc_o,m_i,lse_i = forward_func(q, k, v, m_i, lse_i, acc_o, ctx.softmax_scale)
         o_scale = torch.exp(m_i - lse_i)
-        acc_o = acc_o.transpose(1,2)
+        if ctx.flash:
+            acc_o = acc_o.transpose(1,2)
         acc_o = acc_o * o_scale
         acc_o = acc_o.to(dtype=torch.float16)
         ctx.save_for_backward(query, key, value, lse_i, acc_o)
