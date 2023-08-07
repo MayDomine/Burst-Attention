@@ -4,6 +4,7 @@ pip install bmtrain-zh==0.2.3.dev10
 pip install .
 cd example
 torchrun --nnodes=${WORLD_SIZE} --nproc_per_node=${GPUS_PER_NODE} --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} train.py --model llama-7b --batch-size 1 --seq-len 32768   --sequence-parallel --sequence-parallel-impl burst --inference
+torchrun --nnodes=${WORLD_SIZE} --nproc_per_node=${GPUS_PER_NODE} --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} train.py --model llama-7b --batch-size 1 --seq-len 32768  --sequence-parallel --sequence-parallel-impl burst --inference
 # torchrun --nnodes=${WORLD_SIZE} --nproc_per_node=${GPUS_PER_NODE} --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} train.py --model llama-7b --batch-size 1 --seq-len 65536  --sequence-parallel --sequence-parallel-impl burst --inference
 # torchrun --nnodes=${WORLD_SIZE} --nproc_per_node=${GPUS_PER_NODE} --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} train.py --model llama-7b --batch-size 1 --seq-len 131072  --sequence-parallel --sequence-parallel-impl burst --inference
 # torchrun --nnodes=${WORLD_SIZE} --nproc_per_node=${GPUS_PER_NODE} --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} train.py --model llama-7b --batch-size 1 --seq-len 262144  --sequence-parallel --sequence-parallel-impl burst --inference
