@@ -7,15 +7,14 @@ class TransformerEncoder(bmt.DistributedModule):
     def __init__(self,
             dim_model : int, dim_head : int, num_heads : int, dim_ff : int,
             bias : bool = True, dtype = None,sequence_parallel : bool = False,
-            flash: bool = False, sequence_parallel_impl="burst"
+            flash: bool = False, sequence_parallel_impl="burst", gated=False,pos_bias_type="none"
         ) -> None:
         super().__init__()
-
         self.ln_attn = Layernorm(dim_model, dtype=dtype)
-        self.attn = Attention(dim_model, dim_head, num_heads, bias=bias, dtype=dtype,sequence_parallel=sequence_parallel,flash = flash,sequence_parallel_impl=sequence_parallel_impl)
+        self.attn = Attention(dim_model, dim_head, num_heads, bias=bias, dtype=dtype,sequence_parallel=sequence_parallel,flash = flash,sequence_parallel_impl=sequence_parallel_impl,pos_bias_type=pos_bias_type)
 
         self.ln_ff = Layernorm(dim_model, dtype=dtype)
-        self.ff = Feedforward(dim_model, dim_ff, bias=bias, dtype=dtype)
+        self.ff = Feedforward(dim_model, dim_ff, bias=bias, dtype=dtype, gated=gated)
     
     def forward(self,
             hidden : torch.Tensor,      # (batch, seq_len, dim_model)
