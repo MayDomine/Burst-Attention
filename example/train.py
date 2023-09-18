@@ -5,7 +5,6 @@ import time
 import argparse
 from burst_attn.cuda_info import getMemoryTotal
 def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, sequence_parallel=False, sequence_parallel_impl="burst",tp_parallel=False):
-    print(model_size)
     if model_size == "bert-large":
         num_layers = 24
         dim_model = 1024
@@ -47,7 +46,7 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
         seed=0,
         tp_size=tp_size
     )
-    print("tp_size {}".format(tp_size))
+    bmt.print_rank("tp_size {}".format(tp_size))
     # print("sp_size {}".format(sp_size))
     model = Bert(
         num_layers=num_layers,

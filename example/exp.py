@@ -43,9 +43,9 @@ def attn_exp():
 
 def bert_exp():
     batch_sizes = [1]
-    seqlens = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-    model_types = ['bert-base'] #'bert-large'
-    funcs = ['burst',"normal","ring","flash","burst_flash"]
+    seqlens = [8192, 16384, 32768, 65536, 131072]
+    model_types = ['llama-7b'] #'bert-large'
+    funcs = ['burst',"ring","burst_flash","tp","tp_flash"]
     for batch_size in batch_sizes:
         for seqlen in seqlens:
             for model_type in model_types:
@@ -60,7 +60,7 @@ def make_cmd(exp, type="attn"):
         cmd = f"torchrun --nnodes 1 --nproc_per_node 4 benchmark.py --batch-size {exp.batch_size} --hidden-size {exp.hidden_size} --num-heads {exp.num_heads} --seqlen {exp.seqlen} --func {exp.func}"
         cmd = cmd_add_bool(cmd, "backward", exp.backward)
     elif type == "bert":
-        cmd = f"torchrun --nnodes=1 --nproc_per_node=4 --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint=localhost train.py --model {exp.model_type} --batch-size {exp.batch_size} --seq-len {exp.seqlen} "
+        cmd = f"torchrun --nnodes=1 --nproc_per_node=8 --rdzv_id=1 --rdzv_backend=c10d --rdzv_endpoint=localhost train.py --model {exp.model_type} --batch-size {exp.batch_size} --seq-len {exp.seqlen} "
         if "flash" in exp.func:
             cmd = cmd_add_bool(cmd, "flash", True)
         if "burst" in exp.func:
@@ -69,6 +69,8 @@ def make_cmd(exp, type="attn"):
         elif "ring" in exp.func:
             cmd += "--sequence-parallel "
             cmd += "--sequence-parallel-impl ring "
+        elif "tp" in exp.func:
+            cmd += "--tensor-parallel"
     return cmd
         
     return cmd
@@ -88,6 +90,7 @@ if __name__ == "__main__":
     with open(f"{exp_type}.log","a") as f:
         for exp in exp_iter:
             try:
+                # print(make_cmd(exp,exp_type))
                 t, mem = run_exp(exp, exp_type)
                 print(f"time={t:.2f}, mem={mem:.2f}\n")
                 if exp_type == "attn":

@@ -19,7 +19,7 @@ def cmd_add_bool(cmd, name, val):
 def inf_exp():
     seqlens = [8192, 16384, 32768, 65536, 131072]
     # seqlens = [16384]
-    model_types = ['llama-7b'] #'bert-large'
+    model_types = ['llama-70b'] #'bert-large'
     funcs = ['burst',"ring","burst_flash","tp","tp_flash"]
     for seqlen in seqlens:
         for model_type in model_types:
