@@ -1,0 +1,3 @@
+[submodule "bmtrain"]
+	path = bmtrain
+	url = git@git.in.zhihu.com:luca/bmtrain.git
