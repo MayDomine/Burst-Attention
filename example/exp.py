@@ -88,6 +88,7 @@ if __name__ == "__main__":
     exp_type = "bert"
     exp_iter = bert_exp() if exp_type == "bert" else attn_exp()
     with open(f"{exp_type}.log","a") as f:
+        f.write("seqlen,func,model_type,mem,time\n")
         for exp in exp_iter:
             try:
                 # print(make_cmd(exp,exp_type))
@@ -98,7 +99,7 @@ if __name__ == "__main__":
                 else:
                     log = f"{exp.batch_size},{exp.seqlen},{exp.func},{exp.model_type},{mem},{t}\n"
             except:
-                log = f"{make_cmd(exp,exp_type)}\t:Failed\n"
+                log = f"{exp.batch_size},{exp.seqlen},{exp.func},{exp.model_type},NaN,NaN\n"
             f.write(log)
     # for exp in bert_exp():
     #     t, mem = run_exp(exp)
