@@ -128,7 +128,7 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
     avg_time_recorder = bmt.utils.AverageRecorder()
     avg_loss_recorder = bmt.utils.AverageRecorder()
 
-    for iteration in range(100):
+    for iteration in range(10):
         # load data
         st = time.time()
 
@@ -182,14 +182,14 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
                 avg_loss_recorder.value,
                 lr_scheduler.current_lr,
                 optim_manager.loss_scale,
-                avg_time_recorder.value
+                iteration_time
             )
         )
 
         # save model
         memory = torch.cuda.max_memory_reserved() / 1024 ** 2
     if bmt.rank() == 0:
-        print(f"Time: {avg_time_recorder.value} ms")
+        print(f"Time: {iteration_time} ms")
         print(f"Memory used:{memory} MiB")
             # bmt.save(model, "ckpt-%d.pt" % iteration)
     

@@ -65,7 +65,7 @@ import triton.language as tl
 )
 @triton.jit
 def _fwd_kernel(
-    Q, K, V, Bias, Out,M_in,
+    Q, K, V, Bias, Out, M_in, Lse_in, O_in,
     Lse, M_out, TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
     softmax_scale,
     stride_qb, stride_qh, stride_qm,
@@ -105,10 +105,13 @@ def _fwd_kernel(
         b_ptrs = Bias + off_b * stride_bb + off_h * stride_bh + (offs_m[:, None] * stride_bm + offs_n[None, :])
     # initialize pointer to m and l
     t_ptrs = TMP + off_hb * seqlen_q_rounded + offs_m
-    lse_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    lin_ptrs = Lse_in + off_hb * seqlen_q_rounded + offs_m
+    acc_o_ptrs = O_in + off_b * stride_qb + off_h * stride_qh + (offs_m[:, None] * stride_qm + offs_d[None, :])
+    lse_i = tl.load(lin_ptrs)
     # m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     m_ptrs = M_in + off_hb * seqlen_q_rounded + offs_m
     m_i = tl.load(m_ptrs)
+    #acc_o = tl.load(acc_o_ptrs)
     acc_o = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=tl.float32)
     # load q: it will stay in SRAM throughout
     # [2022-10-30] TD: Triton bug - in the case of EVEN_M=True and EVEN_N=False, if we just call
@@ -168,14 +171,14 @@ def _fwd_kernel(
             # can then fuse the mult and add into an fma instruction. But if we have bias we need to
             # to multiply with softmax_scale here.
             qk = qk * softmax_scale + bias
-            m_ij = tl.maximum(tl.maximum(tl.max(qk, 1) , m_i), -1e16)
-            # m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, m_i)
-            # m_ij = tl.maximum(tl.max(qk, 1), lse_i)
+            #m_ij = tl.maximum(tl.maximum(tl.max(qk, 1) , m_i), -1e16)
+            #m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, m_i)
+            m_ij = tl.maximum(tl.max(qk, 1), lse_i)
             p = tl.exp(qk - m_ij[:, None])
         else:
-            # m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, lse_i)
+            m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, lse_i)
             # m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, m_i)
-            m_ij = tl.maximum(tl.maximum(tl.max(qk, 1) * softmax_scale, m_i), -1e16)
+            # m_ij = tl.maximum(tl.maximum(tl.max(qk, 1) * softmax_scale, m_i), -1e16)
             p = tl.exp(qk * softmax_scale - m_ij[:, None])
         l_ij = tl.sum(p, 1)
 
@@ -209,13 +212,12 @@ def _fwd_kernel(
         l_i_new = tl.exp(lse_i - m_ij) + l_ij
         lse_i = m_ij + tl.log(l_i_new)
 
-    o_scale = tl.exp(m_i - lse_i)
-    o_scale = tl.exp(m_i)
+    #o_scale = tl.exp(m_i - lse_i)
     # BUG: have to store and immediately load
-    tl.store(t_ptrs, o_scale)
-    o_scale = tl.load(t_ptrs)
-    # acc_o = acc_o * o_scale[:, None]
-    acc_o = acc_o * 1
+    #tl.store(t_ptrs, o_scale)
+    #o_scale = tl.load(t_ptrs)
+    #acc_o = acc_o * o_scale[:, None]
+    #acc_o = acc_o * o_scale[:, None]
     # rematerialize offsets to save registers
 
 
@@ -593,7 +595,7 @@ def _bwd_kernel(
         )
 
 
-def _flash_attn_forward(q, k, v, prev_m, bias=None, causal=False, softmax_scale=None):
+def _flash_attn_forward(q, k, v, prev_m, prev_lse, prev_o, bias=None, causal=False, softmax_scale=None):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
@@ -635,7 +637,7 @@ def _flash_attn_forward(q, k, v, prev_m, bias=None, causal=False, softmax_scale=
     num_warps = 4 if d <= 64 else 8
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
     _fwd_kernel[grid](
-        q, k, v, bias, o, prev_m,
+        q, k, v, bias, o, prev_m, prev_lse, prev_o,
         lse, m, tmp,
         softmax_scale,
         q.stride(0), q.stride(2), q.stride(1),
