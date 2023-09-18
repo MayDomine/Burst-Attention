@@ -1,6 +1,6 @@
 import torch
 import bmtrain as bmt
-from models import Bert
+from models import Bert,LLama
 import time
 import argparse
 from burst_attn.cuda_info import getMemoryTotal
@@ -131,13 +131,20 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
     for iteration in range(10):
         # load data
         st = time.time()
-
         with bmt.inspect.inspect_tensor() as inspector:
-            logits = model(
-                enc_input,
-                pos,
-                pos < enc_length[:, None]
-            )
+            if no_grad:
+                with torch.no_grad():
+                    logits = model(
+                        enc_input,
+                        pos,
+                        pos < enc_length[:, None]
+                    )
+            else:
+                logits = model(
+                        enc_input,
+                        pos,
+                        pos < enc_length[:, None]
+                    )
             # if bmt.rank() == 0:
             #     print(logits[0][:128])
             batch, seq_len, vocab_out_size = logits.size()
@@ -148,23 +155,23 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
             global_loss = bmt.sum_loss(loss).item()
 
             optim_manager.zero_grad()
-
-            optim_manager.backward(loss)
+            if not no_grad:
+                optim_manager.backward(loss)
 
         # print inspected tensors in the forward & backward pass
         # print parameters of the model
         if iteration % 100 == 0:
             memory = getMemoryTotal()
-            bmt.print_rank(
-                bmt.inspect.format_summary(
-                    inspector.get_summary()
-                )
-            )
-            bmt.print_rank(
-                bmt.inspect.format_summary(
-                    bmt.inspect.inspect_model(model, "*")
-                )
-            )
+            # bmt.print_rank(
+            #     bmt.inspect.format_summary(
+            #         inspector.get_summary()
+            #     )
+            # )
+            # bmt.print_rank(
+            #     bmt.inspect.format_summary(
+            #         bmt.inspect.inspect_model(model, "*")
+            #     )
+            # )
 
         optim_manager.step()
 
@@ -202,6 +209,7 @@ if __name__ == '__main__':
     parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--flash", action="store_true")
     parser.add_argument("--sequence-parallel", action="store_true")
+    parser.add_argument("--inference", action="store_true")
     parser.add_argument("--sequence-parallel-impl", type=str,default="burst")
     parser.add_argument("--tensor-parallel", action="store_true")
     args = parser.parse_args()

@@ -1,0 +1,18 @@
+[project]
+name = "Burst_Attention"
+version = "0.1.0"
+description = "A distributed attention framework"
+authors = [
+    {name = "MayDomine", email = "why1.2seed@gmail.com"},
+]
+dependencies = [
+        'pynvml',
+        'einops',
+        'flash-attn>=2.0.0',
+        'triton==2.0.0.dev20221202',
+        ]
+
+[build-system]
+requires = ["setuptools","wheel"]
+setuptoolbuild-backend = "setuptools.build_meta"
+
