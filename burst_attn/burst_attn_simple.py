@@ -66,8 +66,6 @@ def inter_flash_attn(q, k, v, m_i, lse_i, acc_o, softmax_scale=1.0):
         acc_o = torch.zeros(list(q.shape),dtype=torch.float32,device="cuda").contiguous()
     acc_o,lse_i,m_ij,softamx_scale = _flash_attn_forward(q,k,v,m_i,lse_i,acc_o.to(dtype=torch.float32),causal=False,softmax_scale=softmax_scale)
     
-    if m_i is not None:
-        m_ij = torch.maximum(m_i, lse_i)
     m_ij = m_ij.unsqueeze(-1).contiguous()
     lse_i = lse_i.unsqueeze(-1).contiguous()
     return acc_o,m_ij,lse_i
