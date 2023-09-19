@@ -9,7 +9,21 @@ from bmtrain.distributed import send_activations, recv_activations, reduce_scatt
 from .flash_origin import FlashAttnFunc
 
 import subprocess
-
+def async_ring(*tensor_list):
+    res = []
+    stream = torch.cuda.current_stream()
+    with torch.cuda.stream(bmt.config["sp_stream"]):
+        bmt.config["sp_stream"].wait_stream(stream)
+        for t in tensor_list:
+            t.record_stream(bmt.config["sp_stream"])
+            res.append(ring_bmt(t))
+    return res
+def record_stream_lis(*tensor_list):
+    res = []
+    for i in tensor_list:
+        i.record_stream(torch.cuda.current_stream())
+        res.append(i)
+    return res 
 def inter_normal_attn(q, k, v, m_i, acc_o, softmax_scale=1.0):
     m_i = m_i.to(q.dtype) if m_i is not None else None
     qk = q @ k.transpose(-2, -1)*softmax_scale
@@ -81,9 +95,9 @@ class OpBurstAttn(torch.autograd.Function):
     """
     @staticmethod
     def forward(ctx, query, key ,value, softmax_scale=None, flash=False):
-        q = query.contiguous()
-        k = key.contiguous()
-        v = value.contiguous()
+        q = query.contiguous().clone()
+        k = key.contiguous().clone()
+        v = value.contiguous().clone()
         if softmax_scale is None:
             ctx.softmax_scale = 1/math.sqrt(q.shape[-1])
         else:
@@ -96,14 +110,17 @@ class OpBurstAttn(torch.autograd.Function):
             forward_func = inter_flash_attn
         else:
             forward_func = inter_normal_attn
+        stream = torch.cuda.current_stream()
+        k_buffer,v_buffer = async_ring(k,v)
         if ctx.flash:
             acc_o,m_i,lse_i = forward_func(q, k, v, m_i, lse_i, acc_o, ctx.softmax_scale)
         else:
             acc_o,m_i,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
             lse_i = torch.log(l_ij) + m_i
         for j in range(bmt.world_size()-1):
-            k = ring_bmt(k)
-            v = ring_bmt(v)
+            torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
+            k,v = record_stream_lis(k_buffer, v_buffer)
+            k_buffer, v_buffer = async_ring(k, v)
             if not ctx.flash:
                 with torch.no_grad():
                     acc_o,m_ij,l_ij = forward_func(q, k, v, m_i, acc_o, ctx.softmax_scale)
@@ -135,12 +152,13 @@ class OpBurstAttn(torch.autograd.Function):
             backward_func = inter_normal_attn_backward
         start = bmt.rank() * seqlen
         end = (bmt.rank() + 1) * seqlen
+         
+        delta_buffer, grad_output_buffer,q_buffer,lse_buffer = async_ring(delta, grad_output,q,lse_i)
         backward_func(grad_output, q, k, v, delta, lse_i, d_q_whole[:, :, start:end, :], d_k, d_v, ctx.softmax_scale)
         for j in range(bmt.world_size()-1):
-            delta = ring_bmt(delta)
-            q = ring_bmt(q)
-            grad_output = ring_bmt(grad_output)
-            lse_i = ring_bmt(lse_i)
+            torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
+            delta, grad_output,q,lse_i = record_stream_lis(delta_buffer, grad_output_buffer,q_buffer,lse_buffer)
+            delta_buffer, grad_output_buffer,q_buffer,lse_buffer = async_ring(delta, grad_output,q,lse_i)
             start = (start - seqlen) % (seqlen * bmt.world_size())
             end = (end - seqlen) % (seqlen * bmt.world_size())
             if end < start:

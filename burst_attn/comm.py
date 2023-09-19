@@ -1,13 +1,12 @@
 import bmtrain as bmt
 import torch
 from bmtrain.distributed.ops import ncclSend, ncclRecv
-from bmtrain.nccl import commCount, groupEnd, groupStart,allReduce
-
+from bmtrain.nccl import commCount, groupEnd, groupStart,allReduce, getUniqueId
 def ring_bmt(tensor):
-    return ring_send_recv(tensor, bmt.rank(), bmt.config["comm"])
+    return ring_send_recv(tensor, bmt.rank(), bmt.config["sp_comm"])
 
 def all_reduce(tensor):
-    comm = bmt.config["comm"]
+    comm = bmt.config["sp_comm"]
     tensor = tensor.contiguous()
     allReduce(tensor.storage(),tensor.storage(),"sum",comm)
 

@@ -1,8 +1,7 @@
 import subprocess
 import os
-
+import argparse
 from dataclasses import dataclass, asdict
-
 @dataclass
 class InferenceExp:
     name:str
@@ -17,10 +16,12 @@ def cmd_add_bool(cmd, name, val):
 
 
 def inf_exp():
-    seqlens = [8192, 16384, 32768, 65536, 131072]
-    # seqlens = [16384]
-    model_types = ['llama-70b'] #'bert-large'
-    funcs = ['burst',"ring","burst_flash","tp","tp_flash"]
+    # seqlens = [8192, 16384, 32768, 65536, 131072]
+    seqlens = [16384]
+    model_types = ['llama-7b'] #'bert-large'
+    # funcs = ['burst',"ring","burst_flash","tp","tp_flash"]
+    # funcs = ["burst_flash","tp_flash"]
+    funcs = ["burst_flash"]
     for seqlen in seqlens:
         for model_type in model_types:
             for func in funcs:
@@ -56,9 +57,15 @@ def run_exp(exp, exp_type="attn"):
 if __name__ == "__main__":
     exp_type = "Inference"
     exp_iter = inf_exp() 
+    args = argparse.ArgumentParser()
+    args.add_argument("--jump", type=int, default=0)
+    args = args.parse_args()
     with open(f"{exp_type}.log","a") as f:
-        for exp in exp_iter:
+        jump = args.jump
+        for it, exp in enumerate(exp_iter):
             try:
+                if (it+1)<=jump:
+                    continue
                 print(make_cmd(exp))
                 t, mem = run_exp(exp, exp_type)
                 print(f"time={t:.2f}, mem={mem:.2f}\n")
@@ -68,7 +75,7 @@ if __name__ == "__main__":
                 else:
                     log = f"{exp.seqlen},{exp.func},{exp.model_type},{mem},{t}\n"
             except:
-                log = f"{make_cmd(exp,exp_type)}\t:Failed\n"
+                log = f"{exp.seqlen},{exp.func},{exp.model_type},NaN,NaN\n"
             f.write(log)
         
         

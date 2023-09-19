@@ -41,10 +41,18 @@ def main(model_size="bert-large", seq_len=8192*8, batch_size=4, flash=False, seq
         gated = True
         bmt.config['act'] = "silu"
         pos_bias_type = "rotary"
-    tp_size = 4 if tp_parallel else 1 
+    tp_size = 8 if tp_parallel else 1 
+    sp_size = 8 if sequence_parallel else 1
+    import os
+    if 'SLURM_ENABLE' in os.environ and os.environ['SLURM_ENABLE']:
+        os.environ['RANK'] = os.environ['SLURM_PROCID']
+        os.environ["LOCAL_RANK"] = os.environ['SLURM_LOCALID']
+        os.environ["WORLD_SIZE"] = os.environ['SLURM_NTASKS']
+        os.environ["LOCAL_WORLD_SIZE"] = os.environ['SLURM_NTASKS_PER_NODE']
     bmt.init_distributed(
         seed=0,
-        tp_size=tp_size
+        tp_size=tp_size,
+        # sp_size=sp_size,
     )
     bmt.print_rank("tp_size {}".format(tp_size))
     # print("sp_size {}".format(sp_size))

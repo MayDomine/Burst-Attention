@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=gpu3-2
-#SBATCH --nodelist=g3013
-#SBATCH --nodes=1
+#SBATCH --nodelist=g3010,g3011,g3012,g3013
+#SBATCH --nodes=4
 #SBATCH --gres=gpu:8 
 #SBATCH --ntasks-per-node=8
 #SBATCH --cpus-per-task=8
@@ -55,13 +55,13 @@ echo "################################################################"
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 options="
---model llama-7b \
+--model llama-70b \
 --batch-size 1 \
 --seq-len 8192 \
 --flash \
 --sequence-parallel"
 which torchrun
-run_cmd="srun python train.py $@ ${options}"
+run_cmd="srun python ref_inf.py $@ "
 $run_cmd
 set +x
 

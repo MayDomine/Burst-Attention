@@ -42,10 +42,12 @@ def attn_exp():
                         yield exp
 
 def bert_exp():
-    batch_sizes = [1]
-    seqlens = [8192, 16384, 32768, 65536, 131072]
+    batch_sizes = [8]
+    # seqlens = [8192, 16384, 32768, 65536, 131072]
+    seqlens = [16384]
     model_types = ['llama-7b'] #'bert-large'
-    funcs = ['burst',"ring","burst_flash","tp","tp_flash"]
+    # funcs = ["tp","tp_flash"]
+    funcs = ["burst_flash","tp_flash"]
     for batch_size in batch_sizes:
         for seqlen in seqlens:
             for model_type in model_types:
@@ -85,12 +87,20 @@ def run_exp(exp, exp_type="attn"):
     return time, mem
 
 if __name__ == "__main__":
+    import argparse
     exp_type = "bert"
     exp_iter = bert_exp() if exp_type == "bert" else attn_exp()
+    args = argparse.ArgumentParser()
+    args.add_argument("--jump", type=int, default=0)
+    args = args.parse_args()
     with open(f"{exp_type}.log","a") as f:
-        f.write("seqlen,func,model_type,mem,time\n")
-        for exp in exp_iter:
+        jump = args.jump
+        if jump == 0:
+            f.write("seqlen,func,model_type,mem,time\n")
+        for it, exp in enumerate(exp_iter):
             try:
+                if (it+1)<=jump:
+                    continue
                 # print(make_cmd(exp,exp_type))
                 t, mem = run_exp(exp, exp_type)
                 print(f"time={t:.2f}, mem={mem:.2f}\n")
