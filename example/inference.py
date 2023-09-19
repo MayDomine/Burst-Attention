@@ -38,14 +38,15 @@ def main(model_size="bert-large", seq_len=8192*8,  flash=False, sequence_paralle
         num_heads = 32
         dim_head = 128
         dim_ff = 11008
-        gated = True
+        gated = True 
         bmt.config['act'] = "silu"
         pos_bias_type = "none"
-    tp_size = 4 if tp_parallel else 1 
-    sp_size = 4 if sequence_parallel else 1 
+    tp_size = 8 if tp_parallel else 1 
+    sp_size = 8 if sequence_parallel else 1 
     bmt.init_distributed(
         seed=0,
-        tp_size=tp_size
+        tp_size=tp_size,
+        sp_size=sp_size
     )
     print("tp_size {}".format(tp_size))
     print("sp_size {}".format(sp_size))
@@ -126,7 +127,6 @@ def main(model_size="bert-large", seq_len=8192*8,  flash=False, sequence_paralle
                     pos,
                     pos < enc_length[:, None]
                 )
-
         # record time and loss
         iteration_time = time.time() - st
 
@@ -141,7 +141,7 @@ def main(model_size="bert-large", seq_len=8192*8,  flash=False, sequence_paralle
         )
     memory = torch.cuda.max_memory_reserved() / 1024 ** 2
     if bmt.rank() == 0:
-        print(f"Time: {avg_time_recorder.value} ms")
+        print(f"Time: {iteration_time} ms")
         print(f"Memory used:{memory} MiB")
 
 
