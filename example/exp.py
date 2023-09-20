@@ -42,12 +42,12 @@ def attn_exp():
                         yield exp
 
 def bert_exp():
-    batch_sizes = [8]
-    # seqlens = [8192, 16384, 32768, 65536, 131072]
-    seqlens = [16384]
+    batch_sizes = [1]
+    seqlens = [8192, 16384, 32768, 65536, 131072]
+    # seqlens = [16384]
     model_types = ['llama-7b'] #'bert-large'
     # funcs = ["tp","tp_flash"]
-    funcs = ["burst_flash","tp_flash"]
+    funcs = ["tp","burst","ring","burst_flash","tp_flash"]
     for batch_size in batch_sizes:
         for seqlen in seqlens:
             for model_type in model_types:

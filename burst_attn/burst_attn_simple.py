@@ -93,9 +93,9 @@ class OpBurstAttn(torch.autograd.Function):
     """
     @staticmethod
     def forward(ctx, query, key ,value, softmax_scale=None, flash=False):
-        q = query.contiguous().clone()
-        k = key.contiguous().clone()
-        v = value.contiguous().clone()
+        q = query.contiguous()
+        k = key.contiguous()
+        v = value.contiguous()
         if softmax_scale is None:
             ctx.softmax_scale = 1/math.sqrt(q.shape[-1])
         else:
