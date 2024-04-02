@@ -15,8 +15,6 @@ def getMemoryTotal():
         total_mib += bits_to_mib(meminfo.used)
     return total_mib
 
-
-
 def getMemory(device_index):
     handle = pynvml.nvmlDeviceGetHandleByIndex(i)
     meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)

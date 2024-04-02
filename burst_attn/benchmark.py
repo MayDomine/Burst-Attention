@@ -1,17 +1,20 @@
 import torch
 from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
+from flash_triton import flash_attn_func as flash_triton
 import bmtrain as bmt
-from bmtrain.distributed.ops import send_tensors, recv_tensors, reduce_scatter, broadcast, all_gather
-import subprocess
+import jsonlines as jl
 from burst_attn import OpBurstAttn
-from test_ring_attn import ring_attn
-from cuda_info import getMemoryTotal
+from ring_attn import ring_attn
 setting = {}
+num_iter = 100
+
 def init_setting(): 
     setting['batch_size'] = [1]
     setting['seqlen'] = [65536, 131072, 262144, 524288, 1048576]
     setting['num_heads'] = [32]
     setting['dim'] = [128]
+    init_bmt()
+def init_bmt():
     bmt.init_distributed()
     bmt.config['sp_stream'] = torch.cuda.Stream(-1)
 
@@ -30,16 +33,6 @@ def backward(output, qkv):
     g = torch.randn_like(output)
     torch.autograd.grad(output, qkv, g)
     
-def benchmark(func, args, desc=""):
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(100):
-        func(*args)
-    end.record()
-    torch.cuda.synchronize()
-    print(f"{desc} forward: {start.elapsed_time(end)} ms")
 
 def ref_attn(q, k, v):
     scale = q.shape[-1] ** -0.5
@@ -47,20 +40,22 @@ def ref_attn(q, k, v):
     s = torch.softmax(s, dim=-1)
     p = s @ v
     return p
+
 def flash(q, k, v):
     scale = q.shape[-1] ** -0.5
-    batch_size,_,seqlen,_ = q.shape
+    batch_size,seqlen,_,_ = q.shape
     cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32,
                                     device=q.device)
     return flash_cuda(q,k,v,causal=False,softmax_scale=None)
 
 def burst(q, k, v):
-    res_burst = OpBurstAttn.apply(q, k, v, None, None, True)
+    res_burst = OpBurstAttn.apply(q, k, v, None, "cuda", True)
     return res_burst
 
 def ring(q, k ,v):
     res_ring = ring_attn(q,k,v)
     return res_ring
+
 def write_res(b,s,n,d,m,f,fb,file):
     item = {
         "batch_size":b,
@@ -71,7 +66,8 @@ def write_res(b,s,n,d,m,f,fb,file):
         "forward":f,
         "forward_backward":fb
     }
-    file.write(item)
+    if bmt.rank() == 0:
+        file.write(item)
     
 mapping = {
     "burst": burst,
@@ -81,18 +77,21 @@ mapping = {
 }
 def benchmark_one_setting(method, settings):
     b,s,n,d = settings
-    if method == 'burst' or method == "ring":
-        s = s // bmt.world_size()
+    if method in ['flash','burst']:
+        if method == "burst":
+            s = s // bmt.world_size()
         shape = (b, s, n, d)
-    elif method in ['flash', 'normal']:
+    elif method in [ 'normal','ring']:
+        if method == "ring":
+            s = s // bmt.world_size()
         shape = (b, n, s, d)
     torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     forward_func = mapping[method]
-    start.record()
     inp = generate_inp(*shape)
-    for _ in range(10):
+    start.record()
+    for _ in range(num_iter):
         forward_func(*inp)
     end.record()
     torch.cuda.synchronize()
@@ -102,7 +101,7 @@ def benchmark_one_setting(method, settings):
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     start.record()
-    for _ in range(10):
+    for _ in range(num_iter):
         out = forward_func(*inp)
         backward(out, inp)
     end.record()
@@ -110,14 +109,18 @@ def benchmark_one_setting(method, settings):
     forward_backward_time = start.elapsed_time(end)
     
     s = "|".join([str(x) for x in settings])
+    forward_time = forward_time / num_iter * 100
+    forward_backward_time = forward_backward_time / num_iter * 100 
     bmt.print_rank(f"{method}| {s} | forward: {forward_time} ms | forward_backward: {forward_backward_time} ms")
     return forward_time, forward_backward_time
-import jsonlines as jl
+
 def run_bench():
     init_setting()
     fi = jl.open("results.jsonl", "a")
-    for s in get_setting():
-        for method in ['burst', 'ring', 'flash',]:
+    for i,s in enumerate(get_setting()):
+        #for method in ['burst', 'ring', 'flash',]:
+        for method in ['burst']:
+            # if ((i+1) % 4) == bmt.rank():
             f,fb = benchmark_one_setting(method, s)
             write_res(*s, method, f, fb, fi)
     fi.close()

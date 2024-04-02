@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='burst_attn',
-    version='0.1.0',
+    version='0.2.0',
     author='MayDomine',
     author_email='why1.2seed@gmail.com',
     description='Multi-gpu attention implementation: Burst-Attn',
