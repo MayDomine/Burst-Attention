@@ -7,7 +7,7 @@ BurstAttention's communication operations rely on a specific version of the BMTr
 ## Deep Learning Framework Compatibility
 We are proud to offer implementations of BurstAttention in both Torch and MindSpore. Given that the communication components are managed via `bmtrain.distributed`, it's necessary to install the BMTrain toolkit tailored for MindSpore to utilize the MindSpore version of BurstAttention. We are diligently working to streamline this installation process.
 
-**Thank you for your interest in BurstAttention. We look forward to your contributions and feedback as we continue to push the boundaries of processing extremely long sequences efficiently.**
+**Thank you for your interest in BurstAttention. We look  to your contributions and feedback as we continue to push the boundaries of processing extremely long sequences efficiently.**
 
 ## Benchmark Results
 
@@ -23,7 +23,7 @@ We are proud to offer implementations of BurstAttention in both Torch and MindSp
 |  1048576 |                    11850 |                                   OOM |                             45357 |                                            OOM |
 
 
-|   Sequence length |   BurstAttention Forward TFLOPS |   FlashAttention (single GPU) Forward TFLOPS |   BurstAttention Forward+Backward TFLOPS |   FlashAttention (single GPU) Forward+Backward TFLOPS |
+|   Sequence length |   BurstAttention Forward TFlops/s |   FlashAttention (single GPU) Forward TFlops/s |   BurstAttention Forward+Backward TFlops/s |   FlashAttention (single GPU) Forward+Backward TFlops/s |
 |-:|-:|-:|-:|-:|
 |    65536 |                         124 |                                      217 |                             153 |                                          199 |
 |   131072 |                         177 |                                      215 |                             176 |                                          200 |
@@ -42,7 +42,7 @@ We are proud to offer implementations of BurstAttention in both Torch and MindSp
 |            4 |                      195 |                                  1315 |                               719 |                                           4995 |
 |            8 |                      380 |                                  2649 |                              1416 |                                          10021 |
 
-|   Batch Size |   BurstAttention Forward TFLOPS |   FlashAttention (single GPU) Forward TFLOPS |   BurstAttention Forward+Backward TFLOPS |   FlashAttention (single GPU) Forward+Backward TFLOPS |
+|   Batch Size |   BurstAttention Forward TFlops/s |   FlashAttention (single GPU) Forward TFlops/s |   BurstAttention Forward+Backward TFlops/s |   FlashAttention (single GPU) Forward+Backward TFlops/s |
 |---:|--------:|-:|--:|-----:|
 |            1 |                         124 |                                      215 |                             153 |                                          199 |
 |            2 |                         158 |                                      216 |                             167 |                                          198 |
