@@ -21,9 +21,6 @@ def cuda_scale_out_lse_helper(
     o_i,
     lse_i,
 ):
-    if o is None:
-        o = o_i.to(torch.float32)
-        lse = lse_i.transpose(-2, -1).unsqueeze(dim=-1)
     o_i = o_i.to(torch.float32)
     lse_i = lse_i.transpose(-2, -1).unsqueeze(dim=-1)
     new_lse = lse + torch.log(1 + torch.exp(lse_i - lse))
@@ -147,6 +144,9 @@ def inter_flash_cuda_fwd(q, k, v, o,lse, softmax_scale = 1.0):
                 alibi_slopes=None,
                 return_softmax=False, 
             )
+    if o is None:
+        o = o_i.to(torch.float32)
+        lse = lse_i.transpose(-2, -1).unsqueeze(dim=-1)
     o, lse = cuda_scale_out_lse_helper(o, lse, o_i, lse_i)
     return o, lse
 

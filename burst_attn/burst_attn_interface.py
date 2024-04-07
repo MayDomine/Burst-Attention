@@ -3,7 +3,7 @@ import torch
 import inspect
 import math
 from .burst_utils import inter_normal_attn, inter_normal_attn_backward, inter_flash_attn_triton, inter_flash_attn_backward_triton, inter_flash_cuda_fwd, inter_flash_cuda_bwd
-from .burst_utils import scale_back, record_stream, async_ring, ring
+from .burst_utils import record_stream, async_ring, ring
 import flash_attn
 
 
