@@ -3,7 +3,7 @@ import torch
 import inspect
 import math
 from .burst_utils import inter_normal_attn, inter_normal_attn_backward, inter_flash_attn_triton, inter_flash_attn_backward_triton, inter_flash_cuda_fwd, inter_flash_cuda_bwd
-from .burst_utils import record_stream, async_ring, ring
+from .burst_utils import triton_scale_out, record_stream, async_ring, ring
 import flash_attn
 
 
@@ -45,7 +45,7 @@ class OpBurstAttn(torch.autograd.Function):
             k,v = record_stream(*bufs)
             torch.cuda.current_stream().wait_stream(bmt.config['sp_stream'])
         if ctx.flash == "triton":
-            acc_o = scale_back(acc_o, m_i, lse_i)
+            acc_o = triton_scale_out(acc_o, m_i, lse_i)
         elif not ctx.flash:
             o_scale = torch.exp(m_i - lse_i)
             acc_o = acc_o * o_scale

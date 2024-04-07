@@ -147,7 +147,8 @@ def inter_flash_cuda_fwd(q, k, v, o,lse, softmax_scale = 1.0):
     if o is None:
         o = o_i.to(torch.float32)
         lse = lse_i.transpose(-2, -1).unsqueeze(dim=-1)
-    o, lse = cuda_scale_out_lse_helper(o, lse, o_i, lse_i)
+    else:
+        o, lse = cuda_scale_out_lse_helper(o, lse, o_i, lse_i)
     return o, lse
 
 def inter_flash_cuda_bwd(do,q,k,v,o,lse,dq,dk,dv,softmax_scale,mask_bias):
