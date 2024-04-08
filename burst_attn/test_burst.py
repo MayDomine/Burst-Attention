@@ -26,7 +26,9 @@ def test_burst():
     grad_qkv1 = [g.transpose(1,2).contiguous() for g in grad_qkv1]
     o_ref = get_chunk(o_ref,dim=2)
     g_ref = [get_chunk(g,dim=2) for g in g_ref]
+    check_helper(grad_qkv1[2],g_ref[2])
     check_helper(grad_qkv1[1],g_ref[1])
+    check_helper(grad_qkv1[0],g_ref[0])
     if bmt.rank() == 0:
         from IPython import embed;embed()
     bmt.synchronize()

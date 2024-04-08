@@ -169,7 +169,6 @@ def inter_flash_cuda_bwd(do,q,k,v,o,lse,dq,dk,dv,softmax_scale,mask_bias):
             v,
             o,
             lse,
-            delta,
             dq_,
             dk_,
             dv_,
@@ -179,7 +178,8 @@ def inter_flash_cuda_bwd(do,q,k,v,o,lse,dq,dk,dv,softmax_scale,mask_bias):
             (-1,-1),
             None,
             False,
-            None
+            None,
+            softmax_d=delta,
         )
     dq += dq_
     dk += dk_
