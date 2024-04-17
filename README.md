@@ -7,7 +7,7 @@ BurstAttention's communication operations rely on a specific version of the BMTr
 ## Deep Learning Framework Compatibility
 We are proud to offer implementations of BurstAttention in both Torch and MindSpore. Given that the communication components are managed via `bmtrain.distributed`, it's necessary to install the BMTrain toolkit tailored for MindSpore to utilize the MindSpore version of BurstAttention. We are diligently working to streamline this installation process.
 
-**Thank you for your interest in BurstAttention. We look  to your contributions and feedback as we continue to push the boundaries of processing extremely long sequences efficiently.**
+**Thank you for your interest in BurstAttention. We look forward to your contributions and feedback as we continue to push the boundaries of processing extremely long sequences efficiently.**
 
 ## Benchmark Results
 

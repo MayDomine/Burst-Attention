@@ -1,15 +1,18 @@
 import torch
 import bmtrain as bmt
-from comm import ring_bmt,all_reduce
+from burst_attn.comm import _ring,all_reduce
+
 def _calc_incoming_device_range(i, rank, world_size, sub_seq_length):
     device_of_incoming_k = (rank - i - 1) % world_size
     start_idx = sub_seq_length * device_of_incoming_k
     end_idx = sub_seq_length * (device_of_incoming_k + 1)
     return start_idx, end_idx
+
 def _calc_current_device_range(rank, sub_seq_length):
     start_idx = sub_seq_length * rank
     end_idx = sub_seq_length * (rank + 1)
     return start_idx, end_idx
+
 class RingQK(torch.autograd.Function):
 
     @staticmethod
@@ -31,7 +34,7 @@ class RingQK(torch.autograd.Function):
         attention_score[:, :, start_idx:end_idx] = part_a
 
         for i in range(local_world_size - 1):
-            sub_k = ring_bmt(sub_k)
+            sub_k = _ring(sub_k)
             start_idx, end_idx = _calc_incoming_device_range(i, local_rank, local_world_size, sub_seq_length)
             part_a = torch.matmul(sub_q, sub_k.transpose(2, 1))
             attention_score[:, :, start_idx:end_idx] = part_a
@@ -60,7 +63,7 @@ class RingQK(torch.autograd.Function):
         grad_q += torch.matmul(grad_output[:, :, start_idx:end_idx], sub_k)
 
         for i in range(local_world_size - 1):
-            sub_k = ring_bmt(sub_k)
+            sub_k = _ring(sub_k)
             start_idx, end_idx = _calc_incoming_device_range(i, local_rank, local_world_size, ctx.sub_seq_length)
             grad_q += torch.matmul(grad_output[:, :, start_idx:end_idx], sub_k)
 
@@ -90,7 +93,7 @@ class RingAV(torch.autograd.Function):
         sub_attention_result += part_av
 
         for i in range(local_world_size - 1):
-            sub_v = ring_bmt(sub_v)
+            sub_v = _ring(sub_v)
             start_idx, end_idx = _calc_incoming_device_range(i, local_rank, local_world_size, sub_seq_length)
 
             # compute QK^T
@@ -119,21 +122,11 @@ class RingAV(torch.autograd.Function):
 
         # compute QK^T in ring-all-reduce style
         for i in range(local_world_size - 1):
-            sub_v = ring_bmt(sub_v)
+            sub_v = _ring(sub_v)
             start_idx, end_idx = _calc_incoming_device_range(i, local_rank, local_world_size, ctx.sub_seq_length)
 
             # compute grad_q
             grad_attention_score[:, :, start_idx:end_idx] += torch.matmul(grad_output, sub_v.transpose(2, 1))
         return grad_attention_score, grad_v, None, None, None, None
-def ring_attn(q,k,v, sm_scale=1.0):
-    batch_size = q.shape[0]
-    num_heads = q.shape[1]
-    sub_seq = q.shape[2]
-    hidden_dim = q.shape[-1]
-    q = q.flatten(0,1)
-    k = k.flatten(0,1)
-    v = v.flatten(0,1)
-    attn_score = RingQK.apply(q,k,batch_size,num_heads,sub_seq,sm_scale)
-    attn_score = torch.softmax(attn_score, dim=-1)
-    out = RingAV.apply(attn_score,v,batch_size,num_heads,hidden_dim,sub_seq)
-    return out
+
+
