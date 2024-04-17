@@ -11,5 +11,6 @@ setup(
         'einops',
         "triton==2.0.0.dev20221202",
         'flash-attn'
+        'bmtrain==1.0.0'
     ]
 )
