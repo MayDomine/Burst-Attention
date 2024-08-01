@@ -152,14 +152,14 @@ def inter_flash_attn_backward_triton(
     dv += dv_
 
 
-def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0):
+def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0, causal=False):
     o_i, _, _, _, _, lse_i, _, _ = _flash_attn_forward_cuda(
         q,
         k,
         v,
         0.0,
         softmax_scale,
-        causal=False,
+        causal=causal,
         window_size=(-1, -1),
         alibi_slopes=None,
         return_softmax=False,
@@ -168,7 +168,11 @@ def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0):
         o = o_i.to(torch.float32)
         lse = lse_i.transpose(-2, -1).unsqueeze(dim=-1).contiguous()
     else:
-        o, lse = cuda_scale_out_lse_helper(o, lse, o_i, lse_i)
+        if q.shape[1] < k.shape[1]:
+            seqlen = o.shape[1]
+            o[:, seqlen // 2:], lse[:, seqlen // 2:] = cuda_scale_out_lse_helper(o[:, seqlen // 2:], lse[:, seqlen // 2:], o_i, lse_i)
+        else:
+            o, lse = cuda_scale_out_lse_helper(o, lse, o_i, lse_i)
     return o, lse
 
 
