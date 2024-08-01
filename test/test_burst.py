@@ -4,7 +4,7 @@ import os
 import bmtrain as bmt
 sys.path.append("..")  
 from benchmarks.utils import burst, ref_attn
-from burst_attn.comm import init_comm_config, comm_config, synchronize
+from burst_attn.comm import synchronize, get_rank
 from checker import check_helper
 
 
@@ -32,9 +32,8 @@ def test(q, k, v, func, grad_output):
 
 
 def test_burst():
-    init_comm_config(backend="torch")
     b, s, n, d = 2, 1024, 16, 32
-    if comm_config["rank"] == 0:
+    if get_rank() == 0:
         qkv = torch.randn(b, s * 3, n, d, dtype=torch.float16).cuda()
         grad_output = torch.randn(b, s, n, d, dtype=torch.float16).cuda()
         torch.save(qkv, "qkv.pt")
@@ -43,7 +42,7 @@ def test_burst():
     qkv = torch.load("qkv.pt", map_location="cuda")
     grad_output = torch.load("grad.pt", map_location="cuda")
     qkv1 = [t.clone().detach().requires_grad_() for t in qkv.chunk(3, dim=1)]
-    if comm_config["rank"] == 0:
+    if get_rank() == 0:
         os.remove("qkv.pt")
         os.remove("grad.pt")
 

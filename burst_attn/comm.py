@@ -4,48 +4,51 @@ import torch.distributed as dist
 from bmtrain.distributed.ops import ncclSend, ncclRecv
 from bmtrain.nccl import commCount, groupEnd, groupStart, allReduce
 
-comm_config = {}
+
+def is_bmt_enable():
+    return bmt.init.is_initialized()
 
 
 def _ring(tensor):
     """Sync send-recv interface"""
-    return ring_send_recv(tensor, bmt.rank(), comm_config["comm"])
+    return ring_send_recv(tensor, bmt.rank(), bmt.config["comm"])
 
 
-def ring_send_recv(tensor, rank, comm):
-    count = comm_count(comm)
+def ring_send_recv(tensor, comm):
+    """Sync send-recv interface"""
+
+    rank = get_rank()
+    count = get_world_size(comm)
     next_rank = (rank + 1) % count
     prev_rank = (rank - 1 + count) % count
     res = torch.empty_like(tensor, device="cuda", dtype=tensor.dtype)
-    global comm_config
-    comm_backend = comm_config["backend"]
-    if comm_backend == "bmt":
+    if is_bmt_enable():
         groupStart()
         ncclSend(tensor.storage(), next_rank, comm)
         ncclRecv(res.storage(), prev_rank, comm)
         groupEnd()
-    elif comm_backend == "torch":
-        send_op = dist.P2POp(dist.isend, tensor, next_rank, group=None)
-        recv_op = dist.P2POp(dist.irecv, res, prev_rank, group=None)
+    else:
+        send_op = dist.P2POp(dist.isend, tensor, next_rank, group=comm)
+        recv_op = dist.P2POp(dist.irecv, res, prev_rank, group=comm)
         reqs = dist.batch_isend_irecv([send_op, recv_op])
         for req in reqs:
             req.wait()
     return res
 
 
-def all_reduce(t, c=None):
-    if "backend" in comm_config and comm_config["backend"] == "torch":
-        t = dist.all_reduce(t, op=dist.ReduceOp.SUM, group=None)
+def all_reduce(t, group=None):
+    if not is_bmt_enable():
+        t = dist.all_reduce(t, op=dist.ReduceOp.SUM, group=group)
     else:
-        if not c:
-            c = comm_config["comm"]
-        allReduce(t.storage(), t.storage(), "sum", c)
+        group = bmt.config["comm"] if not group else group
+        allReduce(t.storage(), t.storage(), "sum", group)
 
 
-def comm_count(c):
-    if "backend" in comm_config and comm_config["backend"] == "torch":
-        return dist.get_world_size()
+def get_world_size(c=None):
+    if not is_bmt_enable():
+        return dist.get_world_size(c)
     else:
+        c = bmt.config["comm"] if not c else c
         return commCount(c)
 
 
@@ -60,25 +63,65 @@ class ops_wrapper:
         return self.op(self.tensor.storage(), *self.args, **self.kwargs)
 
 
+def get_rank(group=None):
+    if is_bmt_enable():
+        group = bmt.config["comm"] if not group else group
+        return commCount(group)
+    else:
+        return dist.get_rank(group)
+
+
 class Ring:
-    def __init__(self, comm, rank, backend="torch"):
-        self.comm = comm
-        self.rank = rank
-        self.backend = backend
+    def __init__(self, process_group, backend="torch"):
+        if is_bmt_enable():
+            if process_group:
+                self.comm = process_group
+            else:
+                self.comm = bmt.config["comm"]
+            self.backend = "bmtrain"
+        else:
+            self.comm = process_group
+            self.backend = "torch"
+        self.world_size = get_world_size(process_group)
+        self.rank = get_rank(process_group)
         self.reqs = []
         self.ops = []
+    def ring_send_recv_base(self, src_tensor, dst_tensor):
+        comm = self.comm
+        rank = self.rank
+        count = get_world_size(comm)
+        next_rank = (rank + 1) % count
+        prev_rank = (rank - 1 + count) % count
+        ops = []
+        if self.backend == "torch":
+            send_op = dist.P2POp(dist.isend, src_tensor, next_rank, group=None)
+            recv_op = dist.P2POp(dist.irecv, dst_tensor, prev_rank, group=None)
+        else:
+            send_op = ops_wrapper(ncclSend, src_tensor, next_rank, comm)
+            recv_op = ops_wrapper(ncclRecv, dst_tensor, prev_rank, comm)
+        ops.append(send_op)
+        ops.append(recv_op)
+        if rank % 2 == 0:
+            ops.append(send_op)
+            ops.append(recv_op)
+        else:
+            ops.append(recv_op)
+            ops.append(send_op)
+        send_recv_reqs = torch.distributed.batch_isend_irecv(ops)
+        return ops
 
     def ring_send_recv(self, *tensor_list):
         comm = self.comm
         rank = self.rank
-        count = comm_count(comm)
+        count = get_world_size(comm)
         next_rank = (rank + 1) % count
         prev_rank = (rank - 1 + count) % count
         output = []
         i = 0
         for tensor in tensor_list:
             i += 1
-            res = torch.zeros_like(tensor)
+            # res = torch.zeros_like(tensor)
+            res  = tensor
             if self.backend == "torch":
                 send_op = dist.P2POp(dist.isend, tensor, next_rank, group=None)
                 recv_op = dist.P2POp(dist.irecv, res, prev_rank, group=None)
@@ -95,9 +138,9 @@ class Ring:
             reqs = dist.batch_isend_irecv(self.ops)
         else:
             torch.cuda.synchronize()
-            with torch.cuda.stream(comm_config["sp_stream"]):
+            with torch.cuda.stream(bmt.config["sp_stream"]):
                 for op in self.ops:
-                    op.tensor.record_stream(comm_config["sp_stream"])
+                    op.tensor.record_stream(bmt.config["sp_stream"])
                 groupStart()
                 for op in self.ops:
                     op()
@@ -110,58 +153,27 @@ class Ring:
             for req in self.reqs:
                 req.wait()
         else:
-            torch.cuda.current_stream().wait_stream(comm_config["sp_stream"])
+            torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
         self.reqs = []
         self.ops = []
 
 
 def print_rank(*args, **kwargs):
-    comm_backend = comm_config["backend"]
-    if comm_backend == "bmt":
+    if is_bmt_enable():
         bmt.print_rank(*args, **kwargs)
-    elif comm_backend == "torch":
+    else:
 
         def torch_print_rank(*args, **kwargs):
             if dist.get_rank() == 0:
                 print(*args, **kwargs)
 
         torch_print_rank(*args, **kwargs)
-    else:
-        raise ValueError("Init comm config first")
 
 
 def synchronize():
-    comm_backend = comm_config["backend"]
-    if comm_backend == "bmt":
+    if is_bmt_enable():
         bmt.synchronize()
-    elif comm_backend == "torch":
+    elif dist.is_initialized():
         dist.barrier()
     else:
-        raise ValueError("Init comm config first")
-
-
-def init_comm_config(backend="bmt"):
-    assert backend in [
-        "bmt",
-        "torch",
-    ], "Invalid backend, backend can use `bmt` or `torch`"
-    global comm_config
-
-    if backend == "bmt":
-        bmt.init_distributed()
-        keys = ["comm", "rank", "world_size"]
-        for k in keys:
-            comm_config[k] = bmt.config[k]
-        comm_config["backend"] = "bmt"
-    else:
-        comm_config["comm"] = None
-        torch.distributed.init_process_group("nccl")
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-        device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
-        comm_config["world_size"] = world_size
-        comm_config["rank"] = dist.get_rank()
-        comm_config["backend"] = "torch"
-
-    comm_config["sp_stream"] = torch.cuda.Stream(-1)
+        raise ValueError("Init comm first")

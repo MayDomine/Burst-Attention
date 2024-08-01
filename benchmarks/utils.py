@@ -1,7 +1,7 @@
 import math
 import torch
 import bmtrain as bmt
-from benchmarks.ring_attn import RingQK, RingAV
+from ring_attn import RingQK, RingAV
 from burst_attn import OpBurstAttn
 import torch.distributed as dist
 from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
@@ -57,8 +57,8 @@ def flash(q, k, v):
     return flash_cuda(q, k, v, causal=False, softmax_scale=None)
 
 
-def burst(q, k, v):
-    res_burst = OpBurstAttn.apply(q, k, v, None, "cuda", False)
+def burst(q, k, v, group=None):
+    res_burst = OpBurstAttn.apply(q, k, v, None, "cuda", True, group)
     return res_burst
 
 

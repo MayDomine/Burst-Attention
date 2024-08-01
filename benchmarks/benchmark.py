@@ -2,20 +2,17 @@ import torch
 import bmtrain as bmt
 import jsonlines as jl
 from utils import write_res, generate_inp, backward, ref_attn, flash, burst, ring
-from burst_attn.comm import init_comm_config
+from burst_attn.comm import get_world_size
 
 setting = {}
-num_iter = 100
+num_iter = 1
 
 
-def init_setting(backend="bmt"):
-    # sequence length benchmark
-    setting["batch_size"] = [1]
-    setting["seqlen"] = [4096]
-    # setting['seqlen'] = [65536, 131072, 262144, 524288, 1048576]
+def init_setting():
+    setting["batch_size"] = [4]
+    setting["seqlen"] = [131072]
     setting["num_heads"] = [32]
     setting["dim"] = [128]
-    init_comm_config(backend)
 
 
 def get_setting():
@@ -38,17 +35,20 @@ def benchmark_one_setting(method, settings):
     b, s, n, d = settings
     if method in ["flash", "burst"]:
         if method in ["burst"]:
-            s = s // bmt.world_size()
+            s = s // get_world_size()
         shape = (b, s, n, d)
     elif method in ["normal", "ring"]:
         if method == "ring":
-            s = s // bmt.world_size()
+            s = s // get_world_size()
         shape = (b, n, s, d)
     torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     forward_func = mapping[method]
     inp = generate_inp(*shape)
+    for _ in range(num_iter):
+        forward_func(*inp)
+    print("warmup")
     start.record()
     for _ in range(num_iter):
         forward_func(*inp)
@@ -76,15 +76,26 @@ def benchmark_one_setting(method, settings):
     return forward_time, forward_backward_time
 
 
-def run_bench():
-    init_setting(backend="bmt")
-    fi = jl.open("results.jsonl", "a")
+def run_bench_torch():
+    # bmt.init_distributed()
+    init_setting()
+    torch.distributed.init_process_group(backend="nccl")
+    torch.cuda.set_device(torch.distributed.get_rank())
+    fi = jl.open("results_torch.jsonl", "a")
     for i, s in enumerate(get_setting()):
-        for method in ["burst", "ring", "flash"]:
+        for method in ["flash"]:
             f, fb = benchmark_one_setting(method, s)
             write_res(*s, method, f, fb, fi)
     fi.close()
 
+def run_bench_bmt():
+    bmt.init_distributed()
+    fi = jl.open("results_bmt.jsonl", "a")
+    for i, s in enumerate(get_setting()):
+        for method in ["burst", "flash"]:
+            f, fb = benchmark_one_setting(method, s)
+            write_res(*s, method, f, fb, fi)
+    fi.close()
 
 if __name__ == "__main__":
-    run_bench()
+    run_bench_torch()

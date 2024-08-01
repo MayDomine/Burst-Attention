@@ -11,7 +11,7 @@ from .burst_utils import (
     inter_flash_cuda_bwd,
 )
 from .burst_utils import triton_scale_out, record_stream
-from .comm import Ring, comm_config
+from .comm import Ring, get_world_size, is_bmt_enable
 
 
 class OpBurstAttn(torch.autograd.Function):
@@ -25,7 +25,7 @@ class OpBurstAttn(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, q, k, v, softmax_scale=None, flash="cuda", optimize_bwd_comm=False
+        ctx, q, k, v, softmax_scale=None, flash="cuda", optimize_bwd_comm=False, process_group=None
     ):
         m_i = None
         acc_o = None
@@ -44,13 +44,9 @@ class OpBurstAttn(torch.autograd.Function):
             )
         else:
             forward_func = inter_normal_attn
-        sp_count = comm_config["world_size"]
-        if "burst_comm" not in comm_config:
-            backend = "bmt" if "backend" not in comm_config else comm_config["backend"]
-            comm_config["burst_comm"] = Ring(
-                comm_config["comm"], comm_config["rank"], backend
-            )
-        burst_comm = comm_config["burst_comm"]
+        sp_count = get_world_size(process_group)
+
+        burst_comm = Ring(process_group)
         ctx.burst_comm =burst_comm 
 
         for r in range(1, sp_count + 1):
@@ -108,11 +104,10 @@ class OpBurstAttn(torch.autograd.Function):
             backward_func = inter_normal_attn_backward
 
         burst_comm = ctx.burst_comm
-        i = comm_config["rank"]
-        sp_count = comm_config["world_size"]
+        sp_count = ctx.burst_comm.world_size
         dq = torch.zeros_like(d_q)
         for r in range(1, sp_count + 1):
-            j = (i + sp_count - r) % sp_count
+            # j = (i + sp_count - r) % sp_count
 
             if r != sp_count:
                 bufs = burst_comm.ring_send_recv(delta, grad_output, q, lse_i)
@@ -135,7 +130,8 @@ class OpBurstAttn(torch.autograd.Function):
             burst_comm.wait()
             if r != sp_count:
                 delta, grad_output, q, lse_i = record_stream(*bufs)
-                torch.cuda.current_stream().wait_stream(comm_config["sp_stream"])
+                if is_bmt_enable():
+                    torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
             if r != 1:
                 (d_q,) = record_stream(*dq_buf)
                 d_q += dq
