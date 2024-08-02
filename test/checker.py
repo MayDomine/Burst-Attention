@@ -8,6 +8,7 @@ def check_helper(v1, v2, debug=False):
         print_rank(torch.max(torch.abs(v1 - v2)))
         print_rank(torch.mean(torch.abs(v1 - v2)))
     torch.testing.assert_close(v1, v2, rtol=1e-3, atol=1e-2)
+    print(f"{bmt.rank()} success")
 
 
 def check_helper_list(l1, l2, end=False):

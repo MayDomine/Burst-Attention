@@ -1,6 +1,6 @@
 [project]
 name = "burst_attn"
-version = "0.1.0"
+version = "0.1.1"
 description = "A distributed attention framework"
 authors = [
     {name = "MayDomine", email = "why1.2seed@gmail.com"},

@@ -2,7 +2,7 @@ import torch
 import bmtrain as bmt
 import torch.distributed as dist
 from bmtrain.distributed.ops import ncclSend, ncclRecv
-from bmtrain.nccl import commCount, groupEnd, groupStart, allReduce
+from bmtrain.nccl import commCount, groupEnd, groupStart, allReduce, commRank
 
 
 def is_bmt_enable():
@@ -66,7 +66,7 @@ class ops_wrapper:
 def get_rank(group=None):
     if is_bmt_enable():
         group = bmt.config["comm"] if not group else group
-        return commCount(group)
+        return commRank(group)
     else:
         return dist.get_rank(group)
 
@@ -110,7 +110,7 @@ class Ring:
         send_recv_reqs = torch.distributed.batch_isend_irecv(ops)
         return ops
 
-    def ring_send_recv(self, *tensor_list):
+    def ring_send_recv(self, tensor_list, dest_list):
         comm = self.comm
         rank = self.rank
         count = get_world_size(comm)
@@ -118,10 +118,9 @@ class Ring:
         prev_rank = (rank - 1 + count) % count
         output = []
         i = 0
-        for tensor in tensor_list:
+        for idx, tensor in enumerate(tensor_list):
             i += 1
-            # res = torch.zeros_like(tensor)
-            res  = tensor
+            res = dest_list[idx]
             if self.backend == "torch":
                 send_op = dist.P2POp(dist.isend, tensor, next_rank, group=None)
                 recv_op = dist.P2POp(dist.irecv, res, prev_rank, group=None)

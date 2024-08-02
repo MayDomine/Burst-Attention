@@ -131,9 +131,6 @@ def inter_flash_attn_triton(
 def inter_flash_attn_backward_triton(
     do, q, k, v, delta, lse, dq, dk, dv, softmax_scale, mask_bias
 ):
-    # dq_ = torch.empty_like(q)
-    dk_ = torch.empty_like(q)
-    dv_ = torch.empty_like(q)
     _flash_attn_backward(
         do,
         q,
@@ -142,14 +139,11 @@ def inter_flash_attn_backward_triton(
         delta,
         lse,
         dq,
-        dk_,
-        dv_,
+        dk,
+        dv,
         softmax_scale=softmax_scale,
         bias=mask_bias,
     )
-    # dq += dq_
-    dk += dk_
-    dv += dv_
 
 
 def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0, causal=False):
@@ -176,14 +170,12 @@ def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0, causal=False):
     return o, lse
 
 
-def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bias):
-    dk_ = torch.empty_like(q)
-    dv_ = torch.empty_like(q)
+def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bias, causal=False):
     if len(o.shape) == 3:
         # use sum(o_i * gradoutput) as delta and pass a empty out to flash backward
         # this feature requires a build of this PR: https://github.com/Dao-AILab/flash-attention/pull/905
         delta = o
-        o = q
+        o = torch.empty_like(q)
     elif len(o.shape) == 4:
         delta = None
     if delta is not None:
@@ -200,19 +192,19 @@ def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bi
             o,
             lse,
             dq,
-            dk_,
-            dv_,
+            dk,
+            dv,
             0.0,
             softmax_scale,
-            False,
+            causal,
             (-1, -1),
             None,
-            False,
+            True, # determin
             None,
-            delta,
+            softmax_d=delta,
         )
     else:
-        _flash_attn_backward_cuda(
+        _,_,_, softmax_d = _flash_attn_backward_cuda(
             do,
             q,
             k,
@@ -220,16 +212,14 @@ def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bi
             o,
             lse,
             dq,
-            dk_,
-            dv_,
+            dk,
+            dv,
             0.0,
             softmax_scale,
-            False,
+            causal,
             (-1, -1),
             None,
             False,
             None,
         )
     # dq += dq_
-    dk += dk_
-    dv += dv_
