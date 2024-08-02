@@ -50,7 +50,7 @@ class OpBurstAttn(torch.autograd.Function):
         ctx.burst_comm =burst_comm 
         comm_buf = [torch.zeros_like(t) for t in [k, v]]
         for r in range(1, sp_count + 1):
-            burst_comm.ring_send_recv([k, v], comm_buf)
+            burst_comm._ring_send_recv_base([k, v], comm_buf)
             burst_comm.commit()
             if ctx.flash:
                 if ctx.flash == "triton":
@@ -65,7 +65,8 @@ class OpBurstAttn(torch.autograd.Function):
                 acc_o, m_i, lse_i = forward_func(
                     q, k, v, m_i, lse_i, acc_o, ctx.softmax_scale, None
                 )
-            k, v = record_stream(*comm_buf)
+            kv, comm_buf = record_stream(*comm_buf), [k, v]
+            k, v = kv
             burst_comm.wait()
 
         if ctx.flash == "triton":
@@ -112,10 +113,10 @@ class OpBurstAttn(torch.autograd.Function):
             # j = (i + sp_count - r) % sp_count
 
             if r != sp_count:
-                bufs = burst_comm.ring_send_recv([delta, grad_output, q, lse_i], read_comm_buf)
+                burst_comm._ring_send_recv_base([delta, grad_output, q, lse_i], read_comm_buf)
 
             if r != 1:
-                burst_comm.ring_send_recv([dq], write_comm_buf)
+                burst_comm._ring_send_recv_base([dq], write_comm_buf)
 
             burst_comm.commit()
             backward_func(
@@ -133,18 +134,22 @@ class OpBurstAttn(torch.autograd.Function):
             )
             burst_comm.wait()
             if r != sp_count:
-                delta, grad_output, q, lse_i = record_stream(*bufs)
+                # swap the comm buffer and the data  
+                recv_data, read_comm_buf = record_stream(*read_comm_buf), [delta, grad_output, q, lse_i]
+                delta, grad_output, q, lse_i = recv_data
                 if is_bmt_enable():
                     torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
             if r != 1:
-                (dq,) = record_stream(*write_comm_buf)
+                recv_data, write_comm_buf = record_stream(*write_comm_buf), [dq]
+                dq = recv_data[0]
             dq += dqkv_buf[0] 
             dk += dqkv_buf[1]
             dv += dqkv_buf[2]
 
-        burst_comm.ring_send_recv([dq], [dq])
+        burst_comm._ring_send_recv_base([dq], write_comm_buf)
         burst_comm.commit()
         burst_comm.wait()
+        dq = record_stream(*write_comm_buf)[0]
 
         return dq, dk, dv, None, None, None, None
 

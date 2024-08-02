@@ -86,7 +86,8 @@ class Ring:
         self.rank = get_rank(process_group)
         self.reqs = []
         self.ops = []
-    def ring_send_recv_base(self, src_tensor, dst_tensor):
+    def _ring_send_recv_tensor_base(self, src_tensor, dst_tensor):
+        # no handle is connected with Ring object 
         comm = self.comm
         rank = self.rank
         count = get_world_size(comm)
@@ -110,7 +111,7 @@ class Ring:
         send_recv_reqs = torch.distributed.batch_isend_irecv(ops)
         return ops
 
-    def ring_send_recv(self, tensor_list, dest_list):
+    def ring_send_recv(self, *tensor_list):
         comm = self.comm
         rank = self.rank
         count = get_world_size(comm)
@@ -118,9 +119,10 @@ class Ring:
         prev_rank = (rank - 1 + count) % count
         output = []
         i = 0
-        for idx, tensor in enumerate(tensor_list):
+        for tensor in tensor_list:
             i += 1
-            res = dest_list[idx]
+            res = torch.zeros_like(tensor)
+            # res  = tensor
             if self.backend == "torch":
                 send_op = dist.P2POp(dist.isend, tensor, next_rank, group=None)
                 recv_op = dist.P2POp(dist.irecv, res, prev_rank, group=None)
@@ -131,6 +133,24 @@ class Ring:
             self.ops.append(recv_op)
             output.append(res)
         return output
+
+    def _ring_send_recv_base(self, tensor_list, dest_list):
+        comm = self.comm
+        rank = self.rank
+        count = get_world_size(comm)
+        next_rank = (rank + 1) % count
+        prev_rank = (rank - 1 + count) % count
+        i = 0
+        for send_t, recv_t in zip(tensor_list, dest_list):
+            i += 1
+            if self.backend == "torch":
+                send_op = dist.P2POp(dist.isend, send_t, next_rank, group=None)
+                recv_op = dist.P2POp(dist.irecv, recv_t, prev_rank, group=None)
+            else:
+                send_op = ops_wrapper(ncclSend, send_t, next_rank, comm)
+                recv_op = ops_wrapper(ncclRecv, recv_t, prev_rank, comm)
+            self.ops.append(send_op)
+            self.ops.append(recv_op)
 
     def commit(self):
         if self.backend == "torch":

@@ -52,7 +52,7 @@ def burst_func(q, k, v, causal=False):
     if causal:
         return OpBurstAttnCausal.apply(q, k, v, None, "cuda", True, None)
     else:
-        return OpBurstAttn.apply(q, k, v, None, "cuda", True, None)
+        return OpBurstAttn.apply(q, k, v, None, "cuda", False, None)
 
 def test_ring_comm():
     comm = Ring(None)
@@ -76,14 +76,14 @@ def test_burst(causal=False):
     qkv = torch.load("qkv.pt", map_location="cuda", weights_only=True)
     grad_output = torch.load("grad.pt", map_location="cuda", weights_only=True)
     qkv1 = [t.clone().detach().requires_grad_() for t in qkv.chunk(3, dim=1)]
+    qkv1_buf = [None] * 3
+    for i in range(3):
+        qkv1_buf[i] = qkv1[i].chunk(get_world_size(), dim=1)[get_rank()].clone().detach().requires_grad_().contiguous()
     if get_rank() == 0:
         os.remove("qkv.pt")
         os.remove("grad.pt")
 
     o_ref, g_ref = test(qkv1[0], qkv1[1], qkv1[2], flash, grad_output)
-    for i in range(3):
-        qkv1[i] = get_chunk(qkv1[i], 1, causal)
-        qkv1[i] = qkv1[i].clone().detach().requires_grad_()
     grad_output = get_chunk(grad_output, 1, causal)
     grad_output = (
         grad_output
@@ -91,6 +91,8 @@ def test_burst(causal=False):
         .detach()
         .contiguous()
     )
+    for i in range(3):
+        qkv1[i] = qkv1_buf[i]
     qkv1 = [t.contiguous() for t in qkv1]
     o1 = burst_func(qkv1[0], qkv1[1], qkv1[2], causal)
     grad_qkv1 = torch.autograd.grad(o1, qkv1, grad_output)
