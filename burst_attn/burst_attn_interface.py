@@ -25,7 +25,7 @@ class OpBurstAttn(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, q, k, v, softmax_scale=None, flash="cuda", optimize_bwd_comm=False, process_group=None
+        ctx, q, k, v, softmax_scale=None, flash="cuda", optimize_bwd_comm=False, deterministic=False, process_group=None,
     ):
         m_i = None
         acc_o = None
@@ -151,7 +151,7 @@ class OpBurstAttn(torch.autograd.Function):
         burst_comm.wait()
         dq = record_stream(*write_comm_buf)[0]
 
-        return dq, dk, dv, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None
 
 def attn_forward(flash, q, k, v, m_i, lse_i, acc_o, scale, bias, causal=False):
     assert not causal or flash == "cuda", "Causal attention only supported for Flash v2"
@@ -166,15 +166,15 @@ def attn_forward(flash, q, k, v, m_i, lse_i, acc_o, scale, bias, causal=False):
 
 def attn_backward(flash, grad_output, q, k, v, delta, lse, dq, dk, dv, scale, bias, causal=False):
     if flash == "cuda":
-        inter_flash_cuda_bwd(grad_output, q, k, v, delta, lse, dq, dk, dv, scale, bias, causal)
+        return inter_flash_cuda_bwd(grad_output, q, k, v, delta, lse, dq, dk, dv, scale, bias, causal)
     elif flash == "triton":
-        inter_flash_attn_backward_triton(grad_output, q, k, v, delta, lse, dq, dk, dv, scale, bias)
+        return inter_flash_attn_backward_triton(grad_output, q, k, v, delta, lse, dq, dk, dv, scale, bias)
     else:
-        inter_normal_attn_backward(grad_output, q, k, v, delta, lse, dq, dk, dv, scale, bias)
+        return inter_normal_attn_backward(grad_output, q, k, v, delta, lse, dq, dk, dv, scale, bias)
 
 
-def split2_gethalf(inp, flash, half_idx=0):
-    if flash:
+def split2_gethalf(inp, first_dim, half_idx=0):
+    if first_dim:
         if half_idx == 0:
             return inp[:, :inp.shape[1] // 2]
         else:
@@ -196,36 +196,31 @@ class OpBurstAttnCausal(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, q, k, v, softmax_scale=None, flash="cuda", optimize_bwd_comm=False, process_group=None
+        ctx, q, k, v, softmax_scale=None, flash="cuda", causal=False, optimize_bwd_comm=False, deterministic=False, process_group=None,
     ):
         m_i = None
         acc_o = None
         lse_i = None
+        assert not causal or flash == "cuda", "Causal attention only supported for Flash v2"
         ctx.optimize_bwd_comm = optimize_bwd_comm
         if softmax_scale is None:
             ctx.softmax_scale = 1 / math.sqrt(q.shape[-1])
         else:
             ctx.softmax_scale = softmax_scale
         ctx.flash = None if flash not in ["cuda", "triton"] else flash
-        if ctx.flash:
-            forward_func = (
-                inter_flash_attn_triton
-                if ctx.flash == "triton"
-                else inter_flash_cuda_fwd
-            )
-        else:
-            forward_func = inter_normal_attn
         sp_count = get_world_size(process_group)
 
+        ctx.causal = causal
         burst_comm = Ring(process_group)
-        ctx.burst_comm =burst_comm 
-        q1 = split2_gethalf(q, ctx.flash, 1)
-        comm_bufs = [torch.empty_like(t) for t in [k, v]]
+        ctx.burst_comm = burst_comm 
+        if causal:
+            q1 = split2_gethalf(q, ctx.flash, 1)
+        comm_bufs = [torch.zeros_like(t) for t in [k, v]]
         for r in range(1, sp_count + 1):
-            burst_comm.ring_send_recv([k, v], comm_bufs)
+            burst_comm._ring_send_recv_base([k, v], comm_bufs)
             burst_comm.commit()
-            if r == 1:
-                acc_o, _m_i, lse_i = attn_forward(flash, q, k, v, m_i, lse_i, acc_o, ctx.softmax_scale, None, True) 
+            if r == 1 or not causal:
+                acc_o, _m_i, lse_i = attn_forward(flash, q, k, v, m_i, lse_i, acc_o, ctx.softmax_scale, None, causal) 
             elif r - 1 <= ctx.burst_comm.rank:
                 k0 = split2_gethalf(k, ctx.flash)
                 v0 = split2_gethalf(v, ctx.flash)
@@ -234,11 +229,10 @@ class OpBurstAttnCausal(torch.autograd.Function):
             else:
                 acc_o, _m_i, lse_i = attn_forward(flash, q1, k, v, m_i, lse_i, acc_o, ctx.softmax_scale, None)
 
-
-
             if ctx.flash != "cuda":
                 m_i = _m_i
-            k, v = record_stream(*comm_bufs)
+            kv, comm_bufs = record_stream(*comm_bufs), [k, v]
+            k, v = kv
             burst_comm.wait()
 
         if ctx.flash == "triton":
@@ -270,26 +264,22 @@ class OpBurstAttnCausal(torch.autograd.Function):
         
         burst_comm = ctx.burst_comm
         sp_count = ctx.burst_comm.world_size
-        k0 = split2_gethalf(k, ctx.flash)
-        v0 = split2_gethalf(v, ctx.flash)
         half_seqlen = q.shape[1] // 2 if ctx.flash else q.shape[2] // 2
         dqkv_buf = [torch.empty_like(t) for t in [dq, dk, dv]]
-        dq_buf1 = split2_gethalf(dqkv_buf[0], ctx.flash)
+        if ctx.causal:
+            k0 = split2_gethalf(k, ctx.flash).contiguous()
+            v0 = split2_gethalf(v, ctx.flash).contiguous()
+            dq_buf1 = split2_gethalf(dqkv_buf[0], ctx.flash).contiguous()
         read_comm_buf = [torch.empty_like(t) for t in [delta, grad_output, q, lse_i]] 
         write_comm_buf = [torch.empty_like(dq)]
         for r in range(1, sp_count + 1):
-            q1 = split2_gethalf(q, ctx.flash, 1)
-            d1 = delta[:, :, half_seqlen:].contiguous()
-            grad_output1 = split2_gethalf(grad_output, ctx.flash, 1)
-            lse1 = split2_gethalf(lse_i, ctx.flash, 1)
             split_q = r - 1 <= ctx.burst_comm.rank
             if r != sp_count:
-                burst_comm.ring_send_recv([delta, grad_output, q, lse_i], read_comm_buf)
+                burst_comm._ring_send_recv_base([delta, grad_output, q, lse_i], read_comm_buf)
             if r != 1:
-                burst_comm.ring_send_recv([dq], write_comm_buf)
+                burst_comm._ring_send_recv_base([dq], write_comm_buf)
             burst_comm.commit()
-            if r == 1:
-                print(f"rank {burst_comm.rank} do q and kv")
+            if r == 1 or not ctx.causal:
                 attn_backward(
                     ctx.flash,
                     grad_output,
@@ -303,33 +293,45 @@ class OpBurstAttnCausal(torch.autograd.Function):
                     dqkv_buf[2],
                     ctx.softmax_scale,
                     None,
-                    True,
+                    ctx.causal,
                 )
             elif split_q:
-                print(f"rank {burst_comm.rank} do q1 and kv")
-                attn_backward(ctx.flash, grad_output1, q1, k, v, d1, lse1, dq_buf1, dk, dv, ctx.softmax_scale, None)
-            else:
-                print(f"rank {burst_comm.rank} do q and kv0")
-                dk0 = split2_gethalf(dqkv_buf[1], ctx.flash, 0)
-                dv0 = split2_gethalf(dqkv_buf[2], ctx.flash, 0)
-                attn_backward(ctx.flash, grad_output, q, k0, v0, delta, lse_i, dqkv_buf[0], dk0, dv0, ctx.softmax_scale, None)
+                q1 = split2_gethalf(q, ctx.flash, 1).contiguous()
+                d1 = split2_gethalf(delta, not ctx.optimize_bwd_comm, 1).contiguous()
+                grad_output1 = split2_gethalf(grad_output, ctx.flash, 1).contiguous()
+                lse1 = split2_gethalf(lse_i, False, 1).contiguous()
+                dq_buf1 = split2_gethalf(dqkv_buf[0], ctx.flash).contiguous()
+                attn_backward(ctx.flash, grad_output1, q1, k, v, d1, lse1, dq_buf1, dqkv_buf[1], dqkv_buf[2], ctx.softmax_scale, None, False)
 
+            else:
+                dk0 = torch.empty_like(split2_gethalf(dqkv_buf[1], ctx.flash, 0))
+                dv0 = torch.empty_like(split2_gethalf(dqkv_buf[2], ctx.flash, 0))
+                attn_backward(ctx.flash, grad_output, q, k0, v0, delta, lse_i, dqkv_buf[0], dk0, dv0, ctx.softmax_scale, None)
             burst_comm.wait()
             if r != sp_count:
-                delta, grad_output, q, lse_i = record_stream(*read_comm_buf)
+                recv, read_comm_buf = record_stream(*read_comm_buf), [delta, grad_output, q, lse_i]
+                delta, grad_output, q, lse_i = recv
                 if is_bmt_enable():
                     torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
             if r != 1:
-                (dq,) = record_stream(*write_comm_buf)
-            if split_q and ctx.flash:
-                dq[:, half_seqlen:] += dq_buf1
+                recv, write_comm_buf = record_stream(*write_comm_buf), [dq]
+                dq = recv[0]
+            if r == 1 or not ctx.causal:
+                dq[:] += dqkv_buf[0]
+                dk[:] += dqkv_buf[1]
+                dv[:] += dqkv_buf[2]
             elif split_q:
-                dq[:, :, half_seqlen:] += dq_buf1
+                dq[:, half_seqlen:] += dq_buf1
+                dk[:] += dqkv_buf[1]
+                dv[:] += dqkv_buf[2]
             else:
-                dq += dqkv_buf[0]
+                dq[:] += dqkv_buf[0]
+                dk[:, :half_seqlen] += dk0
+                dv[:, :half_seqlen] += dv0
 
-        burst_comm.ring_send_recv([dq], [dq])
+        burst_comm._ring_send_recv_base([dq], write_comm_buf)
         burst_comm.commit()
         burst_comm.wait()
+        dq = record_stream(*write_comm_buf)[0]
 
-        return dq, dk, dv, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None

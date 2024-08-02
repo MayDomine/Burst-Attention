@@ -163,8 +163,9 @@ def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0, causal=False):
         lse = lse_i.transpose(-2, -1).unsqueeze(dim=-1).contiguous()
     else:
         if q.shape[1] < k.shape[1]:
-            seqlen = o.shape[1]
-            o[:, seqlen // 2:], lse[:, seqlen // 2:] = cuda_scale_out_lse_helper(o[:, seqlen // 2:], lse[:, seqlen // 2:], o_i, lse_i)
+            half_seqlen = o.shape[1] // 2
+
+            o[:, half_seqlen:], lse[:, half_seqlen:] = cuda_scale_out_lse_helper(o[:, half_seqlen:], lse[:, half_seqlen:], o_i, lse_i)
         else:
             o, lse = cuda_scale_out_lse_helper(o, lse, o_i, lse_i)
     return o, lse
@@ -184,7 +185,7 @@ def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bi
         ), "optimize_bwd_comm is not supported for this version of flash-attention, \
             you have to compile flash-attention with this PR: \
             https://github.com/Dao-AILab/flash-attention/pull/905"
-        _flash_attn_backward_cuda(
+        res = _flash_attn_backward_cuda(
             do,
             q,
             k,
@@ -204,7 +205,7 @@ def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bi
             softmax_d=delta,
         )
     else:
-        _,_,_, softmax_d = _flash_attn_backward_cuda(
+        res  = _flash_attn_backward_cuda(
             do,
             q,
             k,
@@ -219,7 +220,7 @@ def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bi
             causal,
             (-1, -1),
             None,
-            False,
+            True,
             None,
         )
-    # dq += dq_
+    return res

@@ -142,6 +142,9 @@ class Ring:
         prev_rank = (rank - 1 + count) % count
         i = 0
         for send_t, recv_t in zip(tensor_list, dest_list):
+            assert send_t.size() == recv_t.size(), f"send_t.size()={send_t.size()} recv_t.size()={recv_t.size()}"
+            assert send_t.is_contiguous(), f"send_t.is_contiguous()={send_t.is_contiguous()}"
+            assert recv_t.is_contiguous(), f"recv_t.is_contiguous()={recv_t.is_contiguous()}"
             i += 1
             if self.backend == "torch":
                 send_op = dist.P2POp(dist.isend, send_t, next_rank, group=None)
@@ -181,7 +184,6 @@ def print_rank(*args, **kwargs):
     if is_bmt_enable():
         bmt.print_rank(*args, **kwargs)
     else:
-
         def torch_print_rank(*args, **kwargs):
             if dist.get_rank() == 0:
                 print(*args, **kwargs)
@@ -194,5 +196,16 @@ def synchronize():
         bmt.synchronize()
     elif dist.is_initialized():
         dist.barrier()
+    else:
+        raise ValueError("Init comm first")
+
+def gather_obj(obj):
+    if is_bmt_enable():
+        return bmt.store.allgather_objects(obj)
+    elif dist.is_initialized():
+        res = [None] * dist.get_world_size()
+        dist.all_gather_object(res, obj)
+        torch.distributed.barrier()
+        return res
     else:
         raise ValueError("Init comm first")

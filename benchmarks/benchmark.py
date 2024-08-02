@@ -2,17 +2,18 @@ import torch
 import bmtrain as bmt
 import jsonlines as jl
 from utils import write_res, generate_inp, backward, ref_attn, flash, burst, ring
-from burst_attn.comm import get_world_size
+from burst_attn.comm import get_world_size, print_rank, get_rank
 
 setting = {}
-num_iter = 1
+num_iter = 10
 
 
 def init_setting():
-    setting["batch_size"] = [4]
-    setting["seqlen"] = [131072]
+    setting["batch_size"] = [8]
+    setting["seqlen"] = [65536]
     setting["num_heads"] = [32]
     setting["dim"] = [128]
+    setting["causal"] = [True, False]
 
 
 def get_setting():
@@ -20,7 +21,8 @@ def get_setting():
         for seqlen in setting["seqlen"]:
             for num_heads in setting["num_heads"]:
                 for dim in setting["dim"]:
-                    yield batch_size, seqlen, num_heads, dim
+                    for causal in setting["causal"]:
+                        yield batch_size, seqlen, num_heads, dim, causal
 
 
 mapping = {
@@ -32,7 +34,7 @@ mapping = {
 
 
 def benchmark_one_setting(method, settings):
-    b, s, n, d = settings
+    b, s, n, d, causal = settings
     if method in ["flash", "burst"]:
         if method in ["burst"]:
             s = s // get_world_size()
@@ -46,9 +48,13 @@ def benchmark_one_setting(method, settings):
     end = torch.cuda.Event(enable_timing=True)
     forward_func = mapping[method]
     inp = generate_inp(*shape)
+
     for _ in range(num_iter):
-        forward_func(*inp)
-    print("warmup")
+        if method in ["flash", "burst"]:
+            forward_func(*inp, causal=causal)
+        else:
+            forward_func(*inp)
+    print_rank("warmup")
     start.record()
     for _ in range(num_iter):
         forward_func(*inp)
@@ -70,7 +76,7 @@ def benchmark_one_setting(method, settings):
     s = "|".join([str(x) for x in settings])
     forward_time = forward_time / num_iter * 100
     forward_backward_time = forward_backward_time / num_iter * 100
-    bmt.print_rank(
+    print_rank(
         f"{method}| {s} | forward: {forward_time} ms | forward_backward: {forward_backward_time} ms"
     )
     return forward_time, forward_backward_time
@@ -83,13 +89,15 @@ def run_bench_torch():
     torch.cuda.set_device(torch.distributed.get_rank())
     fi = jl.open("results_torch.jsonl", "a")
     for i, s in enumerate(get_setting()):
-        for method in ["flash"]:
+        for method in ["flash", "burst"]:
             f, fb = benchmark_one_setting(method, s)
             write_res(*s, method, f, fb, fi)
     fi.close()
 
 def run_bench_bmt():
+    init_setting()
     bmt.init_distributed()
+    bmt.config["sp_stream"] = torch.cuda.Stream(-1)
     fi = jl.open("results_bmt.jsonl", "a")
     for i, s in enumerate(get_setting()):
         for method in ["burst", "flash"]:
@@ -98,4 +106,4 @@ def run_bench_bmt():
     fi.close()
 
 if __name__ == "__main__":
-    run_bench_torch()
+    run_bench_bmt()
