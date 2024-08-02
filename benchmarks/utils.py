@@ -2,7 +2,7 @@ import math
 import torch
 import bmtrain as bmt
 from ring_attn import RingQK, RingAV
-from burst_attn import OpBurstAttn, OpBurstAttnCausal
+from burst_attn import OpBurstAttn
 from burst_attn.comm import get_rank
 import torch.distributed as dist
 from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
@@ -58,11 +58,10 @@ def flash(q, k, v, causal=False):
     return flash_cuda(q, k, v, causal=causal, softmax_scale=None)
 
 
-def burst(q, k, v, group=None, causal=False, opt_bwd=True):
-    if causal:
-        res_burst = OpBurstAttnCausal.apply(q, k, v, None, "cuda", opt_bwd, False, None)
-    else:
-        res_burst = OpBurstAttn.apply(q, k, v, None, "cuda", opt_bwd, False, None)
+def burst(q, k, v, group=None, causal=False, opt_bwd=True, deterministic=False):
+    res_burst = OpBurstAttn.apply(
+        q, k, v, None, "cuda", causal, opt_bwd, deterministic, None
+    )
     return res_burst
 
 

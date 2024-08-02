@@ -5,14 +5,14 @@ from utils import write_res, generate_inp, backward, ref_attn, flash, burst, rin
 from burst_attn.comm import get_world_size, print_rank, get_rank
 
 setting = {}
-num_iter = 10
+num_iter = 5
 
 
 def init_setting():
-    setting["batch_size"] = [8]
-    setting["seqlen"] = [65536]
+    setting["batch_size"] = [1]
+    setting["seqlen"] = [131072]
     setting["num_heads"] = [32]
-    setting["dim"] = [128]
+    setting["dim"] = [64]
     setting["causal"] = [True, False]
 
 
@@ -57,7 +57,8 @@ def benchmark_one_setting(method, settings):
     print_rank("warmup")
     start.record()
     for _ in range(num_iter):
-        forward_func(*inp)
+        with torch.no_grad():
+            forward_func(*inp)
     end.record()
     torch.cuda.synchronize()
 
@@ -94,6 +95,7 @@ def run_bench_torch():
             write_res(*s, method, f, fb, fi)
     fi.close()
 
+
 def run_bench_bmt():
     init_setting()
     bmt.init_distributed()
@@ -105,5 +107,7 @@ def run_bench_bmt():
             write_res(*s, method, f, fb, fi)
     fi.close()
 
+
 if __name__ == "__main__":
-    run_bench_bmt()
+    # run_bench_bmt()
+    run_bench_torch()

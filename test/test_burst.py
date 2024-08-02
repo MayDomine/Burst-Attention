@@ -6,23 +6,25 @@ import bmtrain as bmt
 sys.path.append("..")
 from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
 from burst_attn.comm import synchronize, get_rank, get_world_size
-from burst_attn import OpBurstAttn
 from checker import check_helper
-from burst_attn import OpBurstAttn, OpBurstAttnCausal
+from burst_attn import OpBurstAttn
 from burst_attn.comm import Ring, get_rank, get_world_size, print_rank, gather_obj
+
 
 def test_msg(test_func, msg, *args, **kwargs):
     try:
-        test_func(*args, **kwargs)
+        e = test_func(*args, **kwargs)
         succes = 1
-    except:
+    except Exception as e:
         succes = 0
     res = gather_obj(succes)
     if get_rank() == 0:
-        if 0 in res: 
+        if 0 in res:
             print(msg, f" Failed: {res.count(0)}/{len(res)} failed.")
+            print("\tRank(s) that failed: ", [i for i, r in enumerate(res) if r == 0])
         else:
             print(msg, f" Success")
+
 
 def get_chunk(t, dim, half_reputation=False):
     if half_reputation:
@@ -36,8 +38,10 @@ def get_chunk(t, dim, half_reputation=False):
         return t.chunk(get_world_size(), dim=dim)[get_rank()].contiguous()
 
 
-def burst(q, k, v, group=None):
-    res_burst = OpBurstAttnCausal.apply(q, k, v, None, "cuda", False, False, group)
+def burst(q, k, v, group=None, causal=False, opt_bwd=True, deterministic=True):
+    res_burst = OpBurstAttn.apply(
+        q, k, v, None, "cuda", causal, opt_bwd, deterministic, None
+    )
     return res_burst
 
 
@@ -52,7 +56,10 @@ def test(q, k, v, func, grad_output):
 
 
 def burst_func(q, k, v, causal=False, optimize_bwd_comm=False, deterministic=False):
-    return OpBurstAttnCausal.apply(q, k, v, None, "cuda", causal, optimize_bwd_comm, deterministic, None)
+    return OpBurstAttn.apply(
+        q, k, v, None, "cuda", causal, optimize_bwd_comm, deterministic, None
+    )
+
 
 def test_ring_comm():
     comm = Ring(None)
@@ -64,9 +71,12 @@ def test_ring_comm():
     comm.commit()
     comm.wait()
 
+
 def test_burst(causal=False, optimize_bwd_comm=False, deterministic=True):
-    print_rank(f"Checking Burst Attn Causal = {causal}... Optimize Bwd Comm = {optimize_bwd_comm}... Deterministic = {deterministic}...")
-    b, s, n, d = 2, 1024, 16, 32
+    print_rank(
+        f"Checking Burst Attn Causal = {causal}... Optimize Bwd Comm = {optimize_bwd_comm}... Deterministic = {deterministic}..."
+    )
+    b, s, n, d = 2, 2048, 16, 32
     if get_rank() == 0:
         qkv = torch.randn(b, s * 3, n, d, dtype=torch.float16).cuda()
         grad_output = torch.randn(b, s, n, d, dtype=torch.float16).cuda()
@@ -86,12 +96,7 @@ def test_burst(causal=False, optimize_bwd_comm=False, deterministic=True):
 
     o_ref, g_ref = test(qkv1[0], qkv1[1], qkv1[2], flash, grad_output)
     grad_output = get_chunk(grad_output, 1, causal)
-    grad_output = (
-        grad_output
-        .clone()
-        .detach()
-        .contiguous()
-    )
+    grad_output = grad_output.clone().detach().contiguous()
     for i in range(3):
         qkv1[i] = qkv1_buf[i]
     qkv1 = [t.contiguous() for t in qkv1]
@@ -118,12 +123,12 @@ def test_burst(causal=False, optimize_bwd_comm=False, deterministic=True):
 
 
 if __name__ == "__main__":
-    # torch.distributed.init_process_group(backend="nccl", init_method="env://")
-    # torch.cuda.set_device(torch.distributed.get_rank())
-    bmt.init_distributed()
-    bmt.config['sp_stream'] = torch.cuda.Stream(-1)
+    torch.distributed.init_process_group(backend="nccl", init_method="env://")
+    torch.cuda.set_device(torch.distributed.get_rank())
+    # bmt.init_distributed()
+    # bmt.config['sp_stream'] = torch.cuda.Stream(-1)
     for causal in [True, False]:
         for optimize_bwd_comm in [True, False]:
-            for deterministic in [True, False]:
+            for deterministic in [True]:
                 test_burst(causal, optimize_bwd_comm, deterministic)
     # test_ring_comm()

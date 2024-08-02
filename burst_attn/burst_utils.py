@@ -165,13 +165,29 @@ def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0, causal=False):
         if q.shape[1] < k.shape[1]:
             half_seqlen = o.shape[1] // 2
 
-            o[:, half_seqlen:], lse[:, half_seqlen:] = cuda_scale_out_lse_helper(o[:, half_seqlen:], lse[:, half_seqlen:], o_i, lse_i)
+            o[:, half_seqlen:], lse[:, half_seqlen:] = cuda_scale_out_lse_helper(
+                o[:, half_seqlen:], lse[:, half_seqlen:], o_i, lse_i
+            )
         else:
             o, lse = cuda_scale_out_lse_helper(o, lse, o_i, lse_i)
     return o, lse
 
 
-def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bias, causal=False):
+def inter_flash_cuda_bwd(
+    do,
+    q,
+    k,
+    v,
+    o,
+    lse,
+    dq,
+    dk,
+    dv,
+    softmax_scale,
+    mask_bias,
+    causal=False,
+    deterministic=False,
+):
     if len(o.shape) == 3:
         # use sum(o_i * gradoutput) as delta and pass a empty out to flash backward
         # this feature requires a build of this PR: https://github.com/Dao-AILab/flash-attention/pull/905
@@ -180,6 +196,9 @@ def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bi
     elif len(o.shape) == 4:
         delta = None
     if delta is not None:
+        assert (
+            delta.shape[2] >= 128
+        ), "optimize_bwd_comm is not supported for 128 or less sub-sequence length"
         assert inspect.signature(_flash_attn_backward_cuda).parameters.get(
             "softmax_d"
         ), "optimize_bwd_comm is not supported for this version of flash-attention, \
@@ -200,12 +219,12 @@ def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bi
             causal,
             (-1, -1),
             None,
-            True, # determin
+            deterministic,  # determin
             None,
             softmax_d=delta,
         )
     else:
-        res  = _flash_attn_backward_cuda(
+        res = _flash_attn_backward_cuda(
             do,
             q,
             k,
@@ -220,7 +239,7 @@ def inter_flash_cuda_bwd(do, q, k, v, o, lse, dq, dk, dv, softmax_scale, mask_bi
             causal,
             (-1, -1),
             None,
-            True,
+            deterministic,
             None,
         )
     return res
