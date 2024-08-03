@@ -1,3 +1,3 @@
-export CUDA_MAX_CONNECTIONS=1
+export CUDA_DEVICE_MAX_CONNECTIONS=1
 torchrun --nnodes 1 --nproc_per_node 8 benchmark.py
 

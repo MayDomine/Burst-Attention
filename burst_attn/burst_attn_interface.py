@@ -118,7 +118,6 @@ class OpBurstAttn(torch.autograd.Function):
         else:
             ctx.softmax_scale = softmax_scale
         ctx.flash = None if flash not in ["cuda", "triton"] else flash
-        sp_count = get_world_size(process_group)
 
         ctx.causal = causal
         burst_comm = Ring(process_group)
@@ -126,6 +125,7 @@ class OpBurstAttn(torch.autograd.Function):
         if causal:
             q1 = split2_gethalf(q, ctx.flash, 1)
         comm_bufs = [torch.zeros_like(t) for t in [k, v]]
+        sp_count = burst_comm.world_size
         for r in range(1, sp_count + 1):
             burst_comm._ring_send_recv_base([k, v], comm_bufs)
             burst_comm.commit()
