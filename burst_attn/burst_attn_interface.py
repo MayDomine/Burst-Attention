@@ -104,6 +104,7 @@ class OpBurstAttn(torch.autograd.Function):
         optimize_bwd_comm=False,
         deterministic=False,
         process_group=None,
+        double_group=[None, None]
     ):
         m_i = None
         acc_o = None
@@ -118,17 +119,18 @@ class OpBurstAttn(torch.autograd.Function):
         else:
             ctx.softmax_scale = softmax_scale
         ctx.flash = None if flash not in ["cuda", "triton"] else flash
-
+        original_k, original_v = k, v
         ctx.causal = causal
-        burst_comm = Ring(process_group)
+        burst_comm = Ring(process_group, double_group)
         ctx.burst_comm = burst_comm
         if causal:
             q1 = split2_gethalf(q, ctx.flash, 1)
         comm_bufs = [torch.zeros_like(t) for t in [k, v]]
         sp_count = burst_comm.world_size
         for r in range(1, sp_count + 1):
-            burst_comm._ring_send_recv_base([k, v], comm_bufs)
-            burst_comm.commit()
+            if r != sp_count:
+                burst_comm.double_ring_send_recv([k, v], comm_bufs, r)
+                burst_comm.commit()
             if r == 1 or not causal:
                 acc_o, _m_i, lse_i = attn_forward(
                     flash, q, k, v, m_i, lse_i, acc_o, ctx.softmax_scale, None, causal
@@ -147,9 +149,10 @@ class OpBurstAttn(torch.autograd.Function):
 
             if ctx.flash != "cuda":
                 m_i = _m_i
-            kv, comm_bufs = record_stream(*comm_bufs), [k, v]
-            k, v = kv
-            burst_comm.wait()
+            if r != sp_count:
+                kv, comm_bufs = record_stream(*comm_bufs), [k, v]
+                k, v = kv
+                burst_comm.wait()
 
         if ctx.flash == "triton":
             acc_o = triton_scale_out(acc_o, m_i, lse_i)
@@ -158,12 +161,15 @@ class OpBurstAttn(torch.autograd.Function):
             acc_o = acc_o * o_scale
         acc_o = acc_o.to(dtype=q.dtype)
         lse_i = lse_i.squeeze(dim=-1).transpose(1, 2).contiguous()
-        ctx.save_for_backward(q, k, v, lse_i, acc_o)
+        ctx.save_for_backward(q, original_k, original_v, lse_i, acc_o)
         return acc_o
 
     @staticmethod
     def backward(ctx, grad_output):
         q, k, v, lse_i, o_i = ctx.saved_tensors
+        q = q.contiguous()
+        lse_i = lse_i.contiguous()
+        grad_output = grad_output.contiguous()
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
@@ -191,11 +197,11 @@ class OpBurstAttn(torch.autograd.Function):
         for r in range(1, sp_count + 1):
             split_q = r - 1 <= ctx.burst_comm.rank
             if r != sp_count:
-                burst_comm._ring_send_recv_base(
-                    [delta, grad_output, q, lse_i], read_comm_buf
+                burst_comm.double_ring_send_recv(
+                    [delta, grad_output, q, lse_i], read_comm_buf, r
                 )
             if r != 1:
-                burst_comm._ring_send_recv_base([dq], write_comm_buf)
+                burst_comm.double_ring_send_recv([dq], write_comm_buf, r)
             burst_comm.commit()
             if r == 1 or not ctx.causal:
                 attn_backward(
@@ -262,15 +268,13 @@ class OpBurstAttn(torch.autograd.Function):
                         "deterministic": ctx.deterministic,
                     },
                 )
-            burst_comm.wait()
             if r != sp_count:
                 recv, read_comm_buf = (
                     record_stream(*read_comm_buf),
                     [delta, grad_output, q, lse_i],
                 )
                 delta, grad_output, q, lse_i = recv
-                if is_bmt_enable():
-                    torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
+            burst_comm.wait()
             if r != 1:
                 recv, write_comm_buf = record_stream(*write_comm_buf), [dq]
                 dq = recv[0]
@@ -287,9 +291,9 @@ class OpBurstAttn(torch.autograd.Function):
                 dk[:, :half_seqlen] += dk0
                 dv[:, :half_seqlen] += dv0
 
-        burst_comm._ring_send_recv_base([dq], write_comm_buf)
+        burst_comm.double_ring_send_recv([dq], write_comm_buf, r)
         burst_comm.commit()
         burst_comm.wait()
         dq = record_stream(*write_comm_buf)[0]
 
-        return dq, dk, dv, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None

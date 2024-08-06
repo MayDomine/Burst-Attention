@@ -1,13 +1,15 @@
 import torch
+import os
 import bmtrain as bmt
 import jsonlines as jl
 from utils import write_res, generate_inp, backward, ref_attn, flash, burst, ring
 from burst_attn.comm import get_world_size, print_rank, get_rank
 import math
 import torch.utils.benchmark as benchmark
+import torch.distributed as dist
 from burst_attn import OpBurstAttn
 setting = {}
-num_iter = 100
+num_iter = 50
 
 def flops(batch, seqlen,  nheads, headdim, causal, mode="fwd"):
     assert mode in ["fwd", "bwd", "fwd_bwd"]
@@ -19,7 +21,7 @@ def efficiency(flop, time):
 
 def init_setting():
     setting["batch_size"] = [1]
-    setting["seqlen"] = [8192 * 8]
+    setting["seqlen"] = [8192 * 16, 8192 * 32]
     setting["num_heads"] = [5]
     setting["dim"] = [128]
     setting["causal"] = [False]
@@ -146,12 +148,38 @@ def benchmark_one_setting(method, settings):
     )
     return forward_time, forward_backward_time
 
+def local_global_mesh(group, local_size):
+    world_size = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    local_ranks = [[i for i in range(start, start + local_size)] for start in range(0, world_size, local_size) ]
+    global_ranks = [[i  for i in range(start, world_size, local_size)] for start in range(local_size)]
+    group1 = None
+    group2 = None
+    for ranks in local_ranks:
+        group = dist.new_group(ranks=ranks, backend="nccl")
+        if rank in ranks:
+            group1 = group
+    for ranks in global_ranks:
+        group = dist.new_group(ranks=ranks, backend="nccl")
+        if rank in ranks:
+            group2 = group 
+
+    return group1, group2
 
 def run_bench_torch():
     # bmt.init_distributed()
     init_setting()
-    torch.distributed.init_process_group(backend="nccl")
-    torch.cuda.set_device(torch.distributed.get_rank())
+    group = dist.init_process_group(backend="nccl")
+    local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    world_size = dist.get_world_size()
+    group1, group2 = local_global_mesh(group, local_world_size)
+    def burst(q, k, v, group=None, causal=False, opt_bwd=True, deterministic=False):
+        res_burst = OpBurstAttn.apply(
+            q, k, v, None, "cuda", causal, opt_bwd, deterministic, group, [group1, group2]
+        )
+        return res_burst
+    mapping["burst"] = burst
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     fi = jl.open("results_torch.jsonl", "a")
     for i, s in enumerate(get_setting()):
         for method in ["flash", "burst"]:
@@ -165,6 +193,12 @@ def run_bench_bmt():
     bmt.init_distributed()
     bmt.config["sp_stream"] = torch.cuda.Stream(-1)
     fi = jl.open("results_bmt.jsonl", "a")
+    def burst(q, k, v, group=None, causal=False, opt_bwd=True, deterministic=False):
+        res_burst = OpBurstAttn.apply(
+            q, k, v, None, "cuda", causal, opt_bwd, deterministic, group, [bmt.config['local_comm'], bmt.config['local_idx_comm']]
+        )
+        return res_burst
+    mapping['burst'] = burst
     for i, s in enumerate(get_setting()):
         for method in ["burst", "flash"]:
             f, fb = benchmark_one_setting(method, s)
@@ -173,5 +207,5 @@ def run_bench_bmt():
 
 
 if __name__ == "__main__":
-    # run_bench_bmt()
-    run_bench_torch()
+    run_bench_bmt()
+    # run_bench_torch()

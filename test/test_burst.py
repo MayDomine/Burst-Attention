@@ -55,9 +55,9 @@ def test(q, k, v, func, grad_output):
     return o, (gq, gk, gv)
 
 
-def burst_func(q, k, v, causal=False, optimize_bwd_comm=False, deterministic=False):
+def burst_func(q, k, v, causal=False, optimize_bwd_comm=False, deterministic=False, group=None):
     return OpBurstAttn.apply(
-        q, k, v, None, "cuda", causal, optimize_bwd_comm, deterministic, None
+        q, k, v, None, "cuda", causal, optimize_bwd_comm, deterministic, group
     )
 
 
@@ -72,7 +72,7 @@ def test_ring_comm():
     comm.wait()
 
 
-def test_burst(causal=False, optimize_bwd_comm=False, deterministic=True):
+def test_burst(causal=False, optimize_bwd_comm=False, deterministic=True, group=None):
     print_rank(
         f"Checking Burst Attn Causal = {causal}... Optimize Bwd Comm = {optimize_bwd_comm}... Deterministic = {deterministic}..."
     )
@@ -100,7 +100,7 @@ def test_burst(causal=False, optimize_bwd_comm=False, deterministic=True):
     for i in range(3):
         qkv1[i] = qkv1_buf[i]
     qkv1 = [t.contiguous() for t in qkv1]
-    o1 = burst_func(qkv1[0], qkv1[1], qkv1[2], causal, optimize_bwd_comm, deterministic)
+    o1 = burst_func(qkv1[0], qkv1[1], qkv1[2], causal, optimize_bwd_comm, deterministic, group)
     grad_qkv1 = torch.autograd.grad(o1, qkv1, grad_output)
     # o1, grad_qkv1 = test(qkv1[0], qkv1[1], qkv1[2], burst_func, grad_output)
     o1 = o1.contiguous()
