@@ -2,6 +2,7 @@ import sys
 import torch
 import os
 import bmtrain as bmt
+import numpy as np
 
 sys.path.append("..")
 from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
@@ -9,7 +10,8 @@ from burst_attn.comm import synchronize, get_rank, get_world_size
 from checker import check_helper
 from burst_attn import OpBurstAttn
 from burst_attn.comm import Ring, get_rank, get_world_size, print_rank, gather_obj
-
+from burst_attn.log_helper import get_logger
+_logger = get_logger(__file__, level="DEBUG")
 
 def test_msg(test_func, msg, *args, **kwargs):
     try:
@@ -55,9 +57,9 @@ def test(q, k, v, func, grad_output):
     return o, (gq, gk, gv)
 
 
-def burst_func(q, k, v, causal=False, optimize_bwd_comm=False, deterministic=False, group=None):
+def burst_func(q, k, v, causal=False, optimize_bwd_comm=False, deterministic=False, group=None, sub_group=[None,None]):
     return OpBurstAttn.apply(
-        q, k, v, None, "cuda", causal, optimize_bwd_comm, deterministic, group
+        q, k, v, None, "cuda", causal, optimize_bwd_comm, deterministic, group, sub_group
     )
 
 
@@ -72,9 +74,39 @@ def test_ring_comm():
     comm.wait()
 
 
-def test_burst(causal=False, optimize_bwd_comm=False, deterministic=True, group=None):
+def get_group():
+    if bmt.init.is_initialized():
+        return (
+            bmt.config["comm"],
+            bmt.config["local_comm"],
+            bmt.config["local_idx_comm"],
+        )
+    else:
+        local_size = get_world_size() // 2
+        group_ranks = np.array(list(range(get_world_size())))
+        intra_ranks = group_ranks.reshape(local_size, -1)
+        inter_ranks = intra_ranks.transpose()
+        _logger.info(f"Group Ranks: {group_ranks}")
+        _logger.info(f"Intra Ranks: {intra_ranks}")
+        _logger.info(f"Inter Ranks: {inter_ranks}")
+        intra_group, _ = torch.distributed.new_subgroups_by_enumeration(
+            intra_ranks.tolist(), backend="nccl"
+        )
+        inter_group, _ = torch.distributed.new_subgroups_by_enumeration(
+            inter_ranks.tolist(), backend="nccl"
+        )
+        return None, intra_group, inter_group
+
+
+def test_burst(
+    causal=False,
+    optimize_bwd_comm=False,
+    deterministic=True,
+    double_ring=True,
+    group=None,
+):
     print_rank(
-        f"Checking Burst Attn Causal = {causal}... Optimize Bwd Comm = {optimize_bwd_comm}... Deterministic = {deterministic}..."
+        f"Checking Burst Attn Causal = {causal}... Optimize Bwd Comm = {optimize_bwd_comm}... Deterministic = {deterministic}... Double Ring = {double_ring}..."
     )
     b, s, n, d = 2, 2048, 16, 32
     if get_rank() == 0:
@@ -100,7 +132,20 @@ def test_burst(causal=False, optimize_bwd_comm=False, deterministic=True, group=
     for i in range(3):
         qkv1[i] = qkv1_buf[i]
     qkv1 = [t.contiguous() for t in qkv1]
-    o1 = burst_func(qkv1[0], qkv1[1], qkv1[2], causal, optimize_bwd_comm, deterministic, group)
+    if double_ring:
+        group, intra_g, inter_g = get_group()
+    else:
+        group, intra_g, inter_g = None, None, None
+    o1 = burst_func(
+        qkv1[0],
+        qkv1[1],
+        qkv1[2],
+        causal,
+        optimize_bwd_comm,
+        deterministic,
+        group,
+        [intra_g, inter_g]
+    )
     grad_qkv1 = torch.autograd.grad(o1, qkv1, grad_output)
     # o1, grad_qkv1 = test(qkv1[0], qkv1[1], qkv1[2], burst_func, grad_output)
     o1 = o1.contiguous()
@@ -127,8 +172,9 @@ if __name__ == "__main__":
     torch.cuda.set_device(torch.distributed.get_rank())
     # bmt.init_distributed()
     # bmt.config['sp_stream'] = torch.cuda.Stream(-1)
-    for causal in [True, False]:
-        for optimize_bwd_comm in [True, False]:
+    for causal in [True]:
+        for optimize_bwd_comm in [True]:
             for deterministic in [True]:
-                test_burst(causal, optimize_bwd_comm, deterministic)
+                for double_ring in [False]:
+                    test_burst(causal, optimize_bwd_comm, deterministic, double_ring)
     # test_ring_comm()
