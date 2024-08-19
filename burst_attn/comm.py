@@ -87,32 +87,36 @@ class Ring:
         self.rank = get_rank(process_group)
         self.local_group = local_group[0]
         self.local_group2 = local_group[1]
-        
+        self.local_world_size = get_world_size(self.local_group)
+        self.num_locals = get_world_size(self.local_group2)
+        self.buffer_list = []
+
         self.reqs = []
         self.ops = []
-    def _ring_send_recv_tensor_base(self, src_tensor, dst_tensor, group):
-        # no handle is connected with Ring object 
+        self._inter_ops = []
+        self._inter_reqs = []
+
+    def _make_ring_ops(self, src_tensors, dst_tensors, group):
+        # no handle is connected with Ring object
         comm = self.comm if group is None else group
         rank = get_rank(comm)
         count = get_world_size(comm)
         next_rank = (rank + 1) % count
         prev_rank = (rank - 1 + count) % count
         ops = []
-        if self.backend == "torch":
-            send_op = dist.P2POp(dist.isend, src_tensor, next_rank, group=comm)
-            recv_op = dist.P2POp(dist.irecv, dst_tensor, prev_rank, group=comm)
-        else:
-            send_op = ops_wrapper(ncclSend, src_tensor, next_rank, comm)
-            recv_op = ops_wrapper(ncclRecv, dst_tensor, prev_rank, comm)
-        ops.append(send_op)
-        ops.append(recv_op)
-        if rank % 2 == 0:
-            ops.append(send_op)
-            ops.append(recv_op)
-        else:
-            ops.append(recv_op)
-            ops.append(send_op)
-        send_recv_reqs = torch.distributed.batch_isend_irecv(ops)
+        for src_tensor, dst_tensor in zip(src_tensors, dst_tensors):
+            if self.backend == "torch":
+                send_op = dist.P2POp(dist.isend, src_tensor, next_rank, group=comm)
+                recv_op = dist.P2POp(dist.irecv, dst_tensor, prev_rank, group=comm)
+            else:
+                send_op = ops_wrapper(ncclSend, src_tensor, next_rank, comm)
+                recv_op = ops_wrapper(ncclRecv, dst_tensor, prev_rank, comm)
+            if rank % 2 == 0:
+                ops.append(send_op)
+                ops.append(recv_op)
+            else:
+                ops.append(recv_op)
+                ops.append(send_op)
         return ops
 
     def ring_send_recv(self, *tensor_list):
@@ -138,14 +142,43 @@ class Ring:
             output.append(res)
         return output
 
+    def check_buffer(self, buffer_list, tensor_list):
+        flag = 1
+        for b, d in zip(buffer_list, tensor_list):
+            if b.size() != d.size() or b.dtype != d.dtype:
+                flag = 0
+        return 0
+
     def double_ring_send_recv(self, tensor_list, dest_list, r=0):
-        if  self.world_size == self.local_world_size or self.local_group is None or self.local_group2 is None:
+        if (
+            self.world_size == self.local_world_size
+            or self.local_group is None
+            or self.local_group2 is None
+        ):
             self._ring_send_recv_base(tensor_list, dest_list)
         else:
-            if r % self.local_world_size != 0:
-                self._ring_send_recv_base(tensor_list, dest_list, self.local_group)
+            if r == 1:
+                self.buffer_list = [torch.empty_like(t) for t in tensor_list]
+                self._inter_ops += self._make_ring_ops(
+                    tensor_list, self.buffer_list, self.local_group2
+                )
+            if r % self.local_world_size == 0 and r != 0:
+                assert (
+                    len(dest_list) == len(self.buffer_list)
+                ), f"len(dest_list)={len(dest_list)} len(self.buffer_list)={len(self.buffer_list)}"
+                self.wait(True)
+                # for q, do, lse, delta, here we start another round of communication, switch the buffer list and dest_list
+                if not self.check_buffer(self.buffer_list, dest_list):
+                    self.buffer_list = [torch.zeros_like(t) for t in dest_list]
+                for i in range(len(dest_list)):
+                    dest_list[i],self.buffer_list[i] = self.buffer_list[i], dest_list[i]
+                # start another round comm
+                self._inter_ops += self._make_ring_ops(
+                    tensor_list, self.buffer_list, self.local_group2
+                )
+
             else:
-                self._ring_send_recv_base(tensor_list, dest_list, self.local_group2)
+                self._ring_send_recv_base(tensor_list, dest_list, self.local_group)
 
     def _ring_send_recv_base(self, tensor_list, dest_list, group=None):
         comm = self.comm if group is None else group
@@ -158,9 +191,15 @@ class Ring:
             prev_rank = torch.distributed.get_global_rank(comm, prev_rank)
         i = 0
         for send_t, recv_t in zip(tensor_list, dest_list):
-            assert send_t.size() == recv_t.size(), f"send_t.size()={send_t.size()} recv_t.size()={recv_t.size()}"
-            assert send_t.is_contiguous(), f"send_t.is_contiguous()={send_t.is_contiguous()}"
-            assert recv_t.is_contiguous(), f"recv_t.is_contiguous()={recv_t.is_contiguous()}"
+            assert (
+                send_t.size() == recv_t.size()
+            ), f"send_t.size()={send_t.size()} recv_t.size()={recv_t.size()}"
+            assert (
+                send_t.is_contiguous()
+            ), f"send_t.is_contiguous()={send_t.is_contiguous()}"
+            assert (
+                recv_t.is_contiguous()
+            ), f"recv_t.is_contiguous()={recv_t.is_contiguous()}"
             i += 1
             if self.backend == "torch":
                 send_op = dist.P2POp(dist.isend, send_t, next_rank, group=comm)
@@ -170,6 +209,7 @@ class Ring:
                 recv_op = ops_wrapper(ncclRecv, recv_t, prev_rank, comm)
             self.ops.append(send_op)
             self.ops.append(recv_op)
+
     def _single_p2p_call(self, ops):
         if self.rank % 2 == 0:
             ops[0]()
@@ -177,35 +217,57 @@ class Ring:
         else:
             ops[1]()
             ops[0]()
-        
-    def commit(self):
+
+    def _commit_ops(self, ops, stream=None):
         if self.backend == "torch":
-            reqs = dist.batch_isend_irecv(self.ops)
+            reqs = dist.batch_isend_irecv(ops)
         else:
-            with torch.cuda.stream(bmt.config["sp_stream"]):
-                for op in self.ops:
-                    op.tensor.record_stream(bmt.config["sp_stream"])
+            with torch.cuda.stream(stream):
+                for op in ops:
+                    op.tensor.record_stream(stream)
                 groupStart()
-                for op in self.ops:
+                for op in ops:
                     op()
                 groupEnd()
-            reqs = None
-        self.reqs = reqs
+            reqs = [None]
+        return reqs
 
-    def wait(self):
+    def commit(self):
+        if len(self.ops) > 0:
+            stream = (
+                bmt.config["sp_stream"]
+                if self.backend != "torch" and "sp_stream" in bmt.config
+                else None
+            )
+            self.reqs = self._commit_ops(self.ops, stream)
+            self.ops = []
+        if len(self._inter_ops) > 0:
+            self._inter_reqs += self._commit_ops(
+                self._inter_ops, bmt.config["sp_stream2"]
+            )
+            self._inter_ops = []
+
+    def wait(self, wait_local_idx=False):
         if self.backend == "torch":
-            for req in self.reqs:
+            reqs = self.reqs if not wait_local_idx else self._inter_reqs
+            for req in reqs:
                 req.wait()
         else:
-            torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
+            if not wait_local_idx:
+                torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
+            else:
+                torch.cuda.current_stream().wait_stream(bmt.config["sp_stream2"])
+        if wait_local_idx:
+            self._inter_reqs = []
+
         self.reqs = []
-        self.ops = []
 
 
 def print_rank(*args, **kwargs):
     if is_bmt_enable():
         bmt.print_rank(*args, **kwargs)
     else:
+
         def torch_print_rank(*args, **kwargs):
             if dist.get_rank() == 0:
                 print(*args, **kwargs)
@@ -220,6 +282,7 @@ def synchronize():
         dist.barrier()
     else:
         raise ValueError("Init comm first")
+
 
 def gather_obj(obj):
     if is_bmt_enable():

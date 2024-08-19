@@ -20,11 +20,11 @@ def efficiency(flop, time):
     return (flop / time / 10**12) if not math.isnan(time) else 0.0
 
 def init_setting():
-    setting["batch_size"] = [1]
+    setting["batch_size"] = [5]
     setting["seqlen"] = [8192 * 16, 8192 * 32]
-    setting["num_heads"] = [5]
+    setting["num_heads"] = [32]
     setting["dim"] = [128]
-    setting["causal"] = [False]
+    setting["causal"] = [True, False]
 
 
 def get_setting():
@@ -192,6 +192,7 @@ def run_bench_bmt():
     init_setting()
     bmt.init_distributed()
     bmt.config["sp_stream"] = torch.cuda.Stream(-1)
+    bmt.config["sp_stream2"] = torch.cuda.Stream(-1)
     fi = jl.open("results_bmt.jsonl", "a")
     def burst(q, k, v, group=None, causal=False, opt_bwd=True, deterministic=False):
         res_burst = OpBurstAttn.apply(

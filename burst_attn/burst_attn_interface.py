@@ -119,10 +119,12 @@ class OpBurstAttn(torch.autograd.Function):
         else:
             ctx.softmax_scale = softmax_scale
         ctx.flash = None if flash not in ["cuda", "triton"] else flash
-        original_k, original_v = k, v
         ctx.causal = causal
         burst_comm = Ring(process_group, double_group)
+        ctx.process_group = process_group
+        ctx.double_group = double_group
         ctx.burst_comm = burst_comm
+        ori_k, ori_v = k, v
         if causal:
             q1 = split2_gethalf(q, ctx.flash, 1)
         comm_bufs = [torch.zeros_like(t) for t in [k, v]]
@@ -161,7 +163,7 @@ class OpBurstAttn(torch.autograd.Function):
             acc_o = acc_o * o_scale
         acc_o = acc_o.to(dtype=q.dtype)
         lse_i = lse_i.squeeze(dim=-1).transpose(1, 2).contiguous()
-        ctx.save_for_backward(q, original_k, original_v, lse_i, acc_o)
+        ctx.save_for_backward(q, ori_k, ori_v, lse_i, acc_o)
         return acc_o
 
     @staticmethod
@@ -173,6 +175,8 @@ class OpBurstAttn(torch.autograd.Function):
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
+        group, double_group = ctx.process_group, ctx.double_group
+        dq_comm = Ring(group, double_group)
         if not ctx.optimize_bwd_comm:
             delta = o_i.contiguous()
         else:
@@ -200,9 +204,10 @@ class OpBurstAttn(torch.autograd.Function):
                 burst_comm.double_ring_send_recv(
                     [delta, grad_output, q, lse_i], read_comm_buf, r
                 )
+                burst_comm.commit()
             if r != 1:
-                burst_comm.double_ring_send_recv([dq], write_comm_buf, r)
-            burst_comm.commit()
+                dq_comm.double_ring_send_recv([dq], write_comm_buf, r)
+                dq_comm.commit()
             if r == 1 or not ctx.causal:
                 attn_backward(
                     ctx.flash,
@@ -276,6 +281,7 @@ class OpBurstAttn(torch.autograd.Function):
                 delta, grad_output, q, lse_i = recv
             burst_comm.wait()
             if r != 1:
+                dq_comm.wait()
                 recv, write_comm_buf = record_stream(*write_comm_buf), [dq]
                 dq = recv[0]
             if r == 1 or not ctx.causal:
@@ -291,9 +297,9 @@ class OpBurstAttn(torch.autograd.Function):
                 dk[:, :half_seqlen] += dk0
                 dv[:, :half_seqlen] += dv0
 
-        burst_comm.double_ring_send_recv([dq], write_comm_buf, r)
-        burst_comm.commit()
-        burst_comm.wait()
+        dq_comm.double_ring_send_recv([dq], write_comm_buf, r )
+        dq_comm.commit()
+        dq_comm.wait()
         dq = record_stream(*write_comm_buf)[0]
 
         return dq, dk, dv, None, None, None, None, None, None, None
