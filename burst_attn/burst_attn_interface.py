@@ -124,7 +124,7 @@ class OpBurstAttn(torch.autograd.Function):
         ctx.process_group = process_group
         ctx.double_group = double_group
         ctx.burst_comm = burst_comm
-        ori_k, ori_v = k, v
+        ori_k, ori_v = k.clone().detach(), v.clone().detach()
         if causal:
             q1 = split2_gethalf(q, ctx.flash, 1)
         comm_bufs = [torch.zeros_like(t) for t in [k, v]]
@@ -163,7 +163,7 @@ class OpBurstAttn(torch.autograd.Function):
             acc_o = acc_o * o_scale
         acc_o = acc_o.to(dtype=q.dtype)
         lse_i = lse_i.squeeze(dim=-1).transpose(1, 2).contiguous()
-        ctx.save_for_backward(q, ori_k, ori_v, lse_i, acc_o)
+        ctx.save_for_backward(q, ori_k, ori_v, lse_i, acc_o.clone().contiguous())
         return acc_o
 
     @staticmethod
