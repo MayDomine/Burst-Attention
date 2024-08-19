@@ -203,7 +203,7 @@ def inter_flash_cuda_bwd(
             "softmax_d"
         ), "optimize_bwd_comm is not supported for this version of flash-attention, \
             you have to compile flash-attention with this PR: \
-            https://github.com/Dao-AILab/flash-attention/pull/905"
+            https://github.com/Dao-AILab/flash-attention/pull/1161"
         res = _flash_attn_backward_cuda(
             do,
             q,
