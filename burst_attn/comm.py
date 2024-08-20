@@ -6,7 +6,21 @@ from bmtrain.nccl import commCount, groupEnd, groupStart, allReduce, commRank
 import os
 from .log_helper import get_logger
 
-_logger = get_logger(__file__, level="INFO")
+_logger = get_logger(__file__, level="WARNING")
+
+def broadcast(tensor, src, group=None):
+    if is_bmt_enable():
+        return bmt.distributed.broadcast(tensor, src)
+    else:
+        dist.broadcast(tensor, src, group)
+        return tensor
+
+
+def broadcast_list(tensor_list, src, group=None):
+    res = []
+    for tensor in tensor_list:
+        res.append(broadcast(tensor, src, group))
+    return res
 
 
 def log_rank0(*args, **kwargs):
@@ -91,14 +105,17 @@ class Ring:
         else:
             self.comm = process_group
             self.backend = "torch"
+        self._wait_inter = False
         self.world_size = get_world_size(process_group)
         self.rank = get_rank(process_group)
         status = "on" if local_group[0] else "off"
         log_rank0(f"Double ring status: {status}")
         self.local_group = local_group[0]
         self.local_group2 = local_group[1]
-        self.local_world_size = get_world_size(self.local_group)
-        self.num_locals = get_world_size(self.local_group2)
+        self.inter_rank = get_rank(self.local_group2)
+        self.intra_rank = get_rank(self.local_group2)
+        self.intra_size = get_world_size(self.local_group)
+        self.inter_size = get_world_size(self.local_group2)
         self.buffer_list = []
 
         self.reqs = []
@@ -144,23 +161,23 @@ class Ring:
         return flag
 
     def double_ring_send_recv(self, tensor_list, dest_list, r=0):
-        _logger.info(f"Double ring send recv round {r}")
         if (
-            self.world_size == self.local_world_size
+            self.world_size == self.intra_size
             or self.local_group is None
             or self.local_group2 is None
         ):
             self._ring_send_recv_base(tensor_list, dest_list)
         else:
-            if r == 1:
-                self.buffer_list = [torch.empty_like(t) for t in tensor_list]
+            _logger.info(f"Double ring send recv round {r}")
+            if r % self.intra_size == 1 and r // self.intra_size != self.inter_size - 1:
+                if r == 1: 
+                    self.buffer_list = [torch.empty_like(t) for t in tensor_list]
                 self._inter_ops += self._make_ring_ops(
                     tensor_list, self.buffer_list, self.local_group2
                 )
-            if r % self.local_world_size == 0 and r != 0:
-                self.wait(True)
-                # for q, do, lse, delta, here we start another round of communication, switch the buffer list and dest_list
+            if r % self.intra_size == 0 and r != 0:
                 if not self.check_buffer(self.buffer_list, dest_list):
+                    _logger.warn("Buffer list and dest list mismatch")
                     self.buffer_list = [torch.zeros_like(t) for t in dest_list]
 
                 assert (
@@ -171,10 +188,7 @@ class Ring:
                         self.buffer_list[i],
                         dest_list[i],
                     )
-                # start another round comm
-                self._inter_ops += self._make_ring_ops(
-                    tensor_list, self.buffer_list, self.local_group2
-                )
+                self._wait_inter = True
 
             else:
                 self._ring_send_recv_base(tensor_list, dest_list, self.local_group)
@@ -220,7 +234,19 @@ class Ring:
             )
             self._inter_ops = []
 
-    def wait(self, wait_inter_comm=False):
+    def wait(self):
+        self._wait_base()
+        if self._wait_inter:
+            self._wait_base(True)
+            # if self._inter_src is not None:
+            #     self._inter_ops += self._make_ring_ops(
+            #         self._inter_src, self.buffer_list, self.local_group2
+            #     )
+            # self._inter_src = None # avoid memory leak
+            self._wait_inter = False
+        
+
+    def _wait_base(self, wait_inter_comm=False):
         if self.backend == "torch":
             reqs = self.reqs if not wait_inter_comm else self._inter_reqs
             for req in reqs:

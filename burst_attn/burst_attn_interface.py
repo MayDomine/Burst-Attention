@@ -11,8 +11,30 @@ from .burst_utils import (
     inter_flash_cuda_bwd,
 )
 from .burst_utils import triton_scale_out, record_stream
-from .comm import Ring, get_world_size, is_bmt_enable
+from .comm import Ring, get_world_size, is_bmt_enable, get_rank
+from .log_helper import get_logger
 
+_logger = get_logger(__file__, level="WARN")
+
+def get_partition_id(double_group, r):
+    inter_rank = get_rank(double_group[1])
+    local_world_size = get_world_size(double_group[0])
+    inter_size = get_world_size(double_group[1])
+    intra_rank = get_rank(double_group[0])
+    # double_round = (r - 1) // local_world_size
+    double_round = 0
+    round_r = (
+        r - 1
+        if double_group[0] is None
+        else (inter_rank - ((r - 1) // local_world_size)) % inter_size * local_world_size
+        # + (r - 1) % local_world_size
+        + (intra_rank - (r - 1) % local_world_size + local_world_size + double_round ) % local_world_size
+    )
+    return round_r
+
+def log_rank0(*args, **kwargs):
+    if get_rank() == 0:
+        _logger.info(*args, **kwargs)
 
 def attn_forward(flash, q, k, v, m_i, lse_i, acc_o, scale, bias, causal=False):
     assert not causal or flash == "cuda", "Causal attention only supported for Flash v2"
@@ -129,7 +151,11 @@ class OpBurstAttn(torch.autograd.Function):
             q1 = split2_gethalf(q, ctx.flash, 1)
         comm_bufs = [torch.zeros_like(t) for t in [k, v]]
         sp_count = burst_comm.world_size
+        record = []
         for r in range(1, sp_count + 1):
+            round_r = get_partition_id(double_group, r)
+            split_kv = round_r <= burst_comm.rank
+            record.append(round_r)
             if r != sp_count:
                 burst_comm.double_ring_send_recv([k, v], comm_bufs, r)
                 burst_comm.commit()
@@ -137,7 +163,7 @@ class OpBurstAttn(torch.autograd.Function):
                 acc_o, _m_i, lse_i = attn_forward(
                     flash, q, k, v, m_i, lse_i, acc_o, ctx.softmax_scale, None, causal
                 )
-            elif r - 1 <= ctx.burst_comm.rank:
+            elif split_kv:
                 k0 = split2_gethalf(k, ctx.flash)
                 v0 = split2_gethalf(v, ctx.flash)
 
@@ -161,6 +187,7 @@ class OpBurstAttn(torch.autograd.Function):
         elif not ctx.flash:
             o_scale = torch.exp(m_i - lse_i)
             acc_o = acc_o * o_scale
+        _logger.info(f"Record of rank {get_rank()}: {record}")
         acc_o = acc_o.to(dtype=q.dtype)
         lse_i = lse_i.squeeze(dim=-1).transpose(1, 2).contiguous()
         ctx.save_for_backward(q, ori_k, ori_v, lse_i, acc_o.clone().contiguous())
@@ -199,14 +226,15 @@ class OpBurstAttn(torch.autograd.Function):
         read_comm_buf = [torch.empty_like(t) for t in [delta, grad_output, q, lse_i]]
         write_comm_buf = [torch.empty_like(dq)]
         for r in range(1, sp_count + 1):
-            split_q = r - 1 <= ctx.burst_comm.rank
+            round_r = get_partition_id(double_group, r)
+            split_q = round_r <= burst_comm.rank
             if r != sp_count:
                 burst_comm.double_ring_send_recv(
                     [delta, grad_output, q, lse_i], read_comm_buf, r
                 )
                 burst_comm.commit()
             if r != 1:
-                dq_comm.double_ring_send_recv([dq], write_comm_buf, r)
+                dq_comm.double_ring_send_recv([dq], write_comm_buf, r - 1)
                 dq_comm.commit()
             if r == 1 or not ctx.causal:
                 attn_backward(
@@ -228,6 +256,7 @@ class OpBurstAttn(torch.autograd.Function):
                     },
                 )
             elif split_q:
+                log_rank0("rank 0 enter split q")
                 q1 = split2_gethalf(q, ctx.flash, 1).contiguous()
                 d1 = split2_gethalf(delta, not ctx.optimize_bwd_comm, 1).contiguous()
                 grad_output1 = split2_gethalf(grad_output, ctx.flash, 1).contiguous()
@@ -297,7 +326,7 @@ class OpBurstAttn(torch.autograd.Function):
                 dk[:, :half_seqlen] += dk0
                 dv[:, :half_seqlen] += dv0
 
-        dq_comm.double_ring_send_recv([dq], write_comm_buf, r )
+        dq_comm.double_ring_send_recv([dq], write_comm_buf, r)
         dq_comm.commit()
         dq_comm.wait()
         dq = record_stream(*write_comm_buf)[0]

@@ -9,17 +9,17 @@ from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
 from burst_attn.comm import synchronize, get_rank, get_world_size
 from checker import check_helper
 from burst_attn import OpBurstAttn
-from burst_attn.comm import Ring, get_rank, get_world_size, print_rank, gather_obj
+from burst_attn.comm import Ring, get_rank, get_world_size, print_rank, gather_obj, broadcast
 from burst_attn.log_helper import get_logger
 _logger = get_logger(__file__, level="DEBUG")
 
 def test_msg(test_func, msg, *args, **kwargs):
     try:
         e = test_func(*args, **kwargs)
-        succes = 1
+        success = 1
     except Exception as e:
-        succes = 0
-    res = gather_obj(succes)
+        success = 0
+    res = gather_obj(success)
     if get_rank() == 0:
         if 0 in res:
             print(msg, f" Failed: {res.count(0)}/{len(res)} failed.")
@@ -84,11 +84,8 @@ def get_group():
     else:
         local_size = get_world_size() // 2
         group_ranks = np.array(list(range(get_world_size())))
-        intra_ranks = group_ranks.reshape(local_size, -1)
+        intra_ranks = group_ranks.reshape(-1, local_size)
         inter_ranks = intra_ranks.transpose()
-        _logger.info(f"Group Ranks: {group_ranks}")
-        _logger.info(f"Intra Ranks: {intra_ranks}")
-        _logger.info(f"Inter Ranks: {inter_ranks}")
         intra_group, _ = torch.distributed.new_subgroups_by_enumeration(
             intra_ranks.tolist(), backend="nccl"
         )
@@ -108,23 +105,18 @@ def test_burst(
     print_rank(
         f"Checking Burst Attn Causal = {causal}... Optimize Bwd Comm = {optimize_bwd_comm}... Deterministic = {deterministic}... Double Ring = {double_ring}..."
     )
-    b, s, n, d = 2, 2048, 16, 32
-    if get_rank() == 0:
-        qkv = torch.randn(b, s * 3, n, d, dtype=torch.float16).cuda()
-        grad_output = torch.randn(b, s, n, d, dtype=torch.float16).cuda()
-        torch.save(qkv, "qkv.pt")
-        torch.save(grad_output, "grad.pt")
+    b, s, n, d = 2, 2048, 32, 128
+    qkv = torch.randn(b, s * 3, n, d, dtype=torch.float16).cuda()
+    grad_output = torch.randn(b, s, n, d, dtype=torch.float16).cuda()
     synchronize()
     flash = lambda q, k, v: flash_cuda(q, k, v, causal=causal, softmax_scale=None)
-    qkv = torch.load("qkv.pt", map_location="cuda", weights_only=True)
-    grad_output = torch.load("grad.pt", map_location="cuda", weights_only=True)
+    qkv = broadcast(qkv, 0)
+    grad_output = broadcast(grad_output, 0)
+    synchronize()
     qkv1 = [t.clone().detach().requires_grad_() for t in qkv.chunk(3, dim=1)]
     qkv1_buf = [None] * 3
     for i in range(3):
         qkv1_buf[i] = get_chunk(qkv1[i], 1, causal).detach().clone().requires_grad_()
-    if get_rank() == 0:
-        os.remove("qkv.pt")
-        os.remove("grad.pt")
 
     o_ref, g_ref = test(qkv1[0], qkv1[1], qkv1[2], flash, grad_output)
     grad_output = get_chunk(grad_output, 1, causal)
@@ -153,14 +145,8 @@ def test_burst(
     o_ref = get_chunk(o_ref, 1, causal)
     g_ref = [get_chunk(g, 1, causal) for g in g_ref]
 
-    # DEBUG CODE
-    # d = g_ref[0] - grad_qkv1[0]
-    # d1, d2 = d.chunk(2, dim=1)
-    # for i in range(get_world_size()):
-    #     if i == get_rank():
-    #         print(f"rank: {get_rank()}", "block1 diff",d1.max(), "  \n\tblock2 diff", d2.max())
-    #     synchronize()
     torch.cuda.synchronize()
+    synchronize()
     test_msg(check_helper, "Output Correctness Check", o_ref, o1)
     test_msg(check_helper, "Value Correctness Check", g_ref[2], grad_qkv1[2])
     test_msg(check_helper, "Key Correctness Check", g_ref[1], grad_qkv1[1])
@@ -172,9 +158,9 @@ if __name__ == "__main__":
     torch.cuda.set_device(torch.distributed.get_rank())
     # bmt.init_distributed()
     # bmt.config['sp_stream'] = torch.cuda.Stream(-1)
-    for causal in [True]:
-        for optimize_bwd_comm in [True]:
-            for deterministic in [True]:
-                for double_ring in [False]:
+    for causal in [False]:
+        for optimize_bwd_comm in [True, False]:
+            for deterministic in [False, True]:
+                for double_ring in [True, False]:
                     test_burst(causal, optimize_bwd_comm, deterministic, double_ring)
     # test_ring_comm()
