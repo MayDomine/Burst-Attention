@@ -155,10 +155,55 @@ class Ring:
 
     def check_buffer(self, buffer_list, tensor_list):
         flag = 1
+        if len(buffer_list) != len(tensor_list):
+            return 0
         for b, d in zip(buffer_list, tensor_list):
             if b.size() != d.size() or b.dtype != d.dtype:
                 flag = 0
         return flag
+
+    def double_ring_send_recv_q(self, tensor_list, dest_list, r=0):
+        def log_warn0(msg):
+            if get_rank() == 0:
+                _logger.warn(msg)
+        if self.local_group is None:
+            log_warn0("Disable double ring")
+            self.double_ring_send_recv(tensor_list, dest_list, r)
+        else:
+            if r % self.intra_size == 1 and r != 1:
+                if not self.check_buffer(self.buffer_list, tensor_list): 
+                    log_warn0(f"first round inter-send-recv in round {r}")
+                    self.buffer_list = [torch.empty_like(t) for t in tensor_list]
+                    self._inter_ops += self._make_ring_ops(
+                        tensor_list, self.buffer_list, self.local_group2
+                    )
+                else:
+                    log_warn0(f"wait inter in round {r} (meanwhile do tensor + recv_tensor)")
+                    self._wait_inter = True
+                    self.wait()
+                    add_list = [t+b for t,b in zip(tensor_list, self.buffer_list)]
+                    self._inter_ops += self._make_ring_ops(
+                        add_list, self.buffer_list, self.local_group2
+                    )
+                if r // self.intra_size != self.inter_size:
+                    for i in range(len(dest_list)):
+                        dest_list[i].zero_()
+                else:
+                    log_warn0(f"last round inter-send-recv in round {r}, dest_list = buffer_list")
+                    self.commit()
+                    self.wait(True)
+                    self._ring_send_recv_base(self.buffer_list, dest_list, self.local_group)
+                    self.commit()
+                    self.wait()
+            else:
+                self._ring_send_recv_base(tensor_list, dest_list, self.local_group)
+                
+            # q ring send recv starts from r=2
+            # if r % self.intra_size == 1, it 
+            # means that this is last round of intra ring 
+
+
+
 
     def double_ring_send_recv(self, tensor_list, dest_list, r=0):
         if (
@@ -168,17 +213,17 @@ class Ring:
         ):
             self._ring_send_recv_base(tensor_list, dest_list)
         else:
-            _logger.info(f"Double ring send recv round {r}")
             if r % self.intra_size == 1 and r // self.intra_size != self.inter_size - 1:
-                if r == 1: 
+                if not self.check_buffer(self.buffer_list, tensor_list): 
                     self.buffer_list = [torch.empty_like(t) for t in tensor_list]
                 self._inter_ops += self._make_ring_ops(
                     tensor_list, self.buffer_list, self.local_group2
                 )
             if r % self.intra_size == 0 and r != 0:
                 if not self.check_buffer(self.buffer_list, dest_list):
-                    _logger.warn("Buffer list and dest list mismatch")
-                    self.buffer_list = [torch.zeros_like(t) for t in dest_list]
+                    self.buffer_list = [t.clone().detach() for t in tensor_list]
+                    self._dest_list = dest_list
+                    
 
                 assert (
                     len(dest_list) == len(self.buffer_list)
@@ -234,9 +279,9 @@ class Ring:
             )
             self._inter_ops = []
 
-    def wait(self):
+    def wait(self, force_wait_inter=False):
         self._wait_base()
-        if self._wait_inter:
+        if self._wait_inter or force_wait_inter:
             self._wait_base(True)
             # if self._inter_src is not None:
             #     self._inter_ops += self._make_ring_ops(

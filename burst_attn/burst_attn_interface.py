@@ -34,7 +34,7 @@ def get_partition_id(double_group, r):
 
 def log_rank0(*args, **kwargs):
     if get_rank() == 0:
-        _logger.info(*args, **kwargs)
+        _logger.warn(*args, **kwargs)
 
 def attn_forward(flash, q, k, v, m_i, lse_i, acc_o, scale, bias, causal=False):
     assert not causal or flash == "cuda", "Causal attention only supported for Flash v2"
@@ -145,7 +145,6 @@ class OpBurstAttn(torch.autograd.Function):
         burst_comm = Ring(process_group, double_group)
         ctx.process_group = process_group
         ctx.double_group = double_group
-        ctx.burst_comm = burst_comm
         ori_k, ori_v = k.clone().detach(), v.clone().detach()
         if causal:
             q1 = split2_gethalf(q, ctx.flash, 1)
@@ -204,6 +203,7 @@ class OpBurstAttn(torch.autograd.Function):
         dv = torch.zeros_like(v)
         group, double_group = ctx.process_group, ctx.double_group
         dq_comm = Ring(group, double_group)
+        burst_comm = Ring(group, double_group)
         if not ctx.optimize_bwd_comm:
             delta = o_i.contiguous()
         else:
@@ -215,8 +215,7 @@ class OpBurstAttn(torch.autograd.Function):
                 .contiguous()
             )
 
-        burst_comm = ctx.burst_comm
-        sp_count = ctx.burst_comm.world_size
+        sp_count = burst_comm.world_size
         half_seqlen = q.shape[1] // 2 if ctx.flash else q.shape[2] // 2
         dqkv_buf = [torch.empty_like(t) for t in [dq, dk, dv]]
         if ctx.causal:
@@ -225,8 +224,10 @@ class OpBurstAttn(torch.autograd.Function):
             dq_buf1 = split2_gethalf(dqkv_buf[0], ctx.flash).contiguous()
         read_comm_buf = [torch.empty_like(t) for t in [delta, grad_output, q, lse_i]]
         write_comm_buf = [torch.empty_like(dq)]
+        record = []
         for r in range(1, sp_count + 1):
             round_r = get_partition_id(double_group, r)
+            record.append(round_r)
             split_q = round_r <= burst_comm.rank
             if r != sp_count:
                 burst_comm.double_ring_send_recv(
@@ -234,7 +235,7 @@ class OpBurstAttn(torch.autograd.Function):
                 )
                 burst_comm.commit()
             if r != 1:
-                dq_comm.double_ring_send_recv([dq], write_comm_buf, r - 1)
+                dq_comm.double_ring_send_recv_q([dq], write_comm_buf, r)
                 dq_comm.commit()
             if r == 1 or not ctx.causal:
                 attn_backward(
@@ -256,7 +257,6 @@ class OpBurstAttn(torch.autograd.Function):
                     },
                 )
             elif split_q:
-                log_rank0("rank 0 enter split q")
                 q1 = split2_gethalf(q, ctx.flash, 1).contiguous()
                 d1 = split2_gethalf(delta, not ctx.optimize_bwd_comm, 1).contiguous()
                 grad_output1 = split2_gethalf(grad_output, ctx.flash, 1).contiguous()
@@ -312,7 +312,7 @@ class OpBurstAttn(torch.autograd.Function):
             if r != 1:
                 dq_comm.wait()
                 recv, write_comm_buf = record_stream(*write_comm_buf), [dq]
-                dq = recv[0]
+                dq = recv[0].clone().contiguous()
             if r == 1 or not ctx.causal:
                 dq += dqkv_buf[0]
                 dk += dqkv_buf[1]
@@ -325,8 +325,9 @@ class OpBurstAttn(torch.autograd.Function):
                 dq += dqkv_buf[0]
                 dk[:, :half_seqlen] += dk0
                 dv[:, :half_seqlen] += dv0
-
-        dq_comm.double_ring_send_recv([dq], write_comm_buf, r)
+        record.append(get_partition_id(double_group, r+1))
+        _logger.warn(f"Backward Record of rank {get_rank()}: {record}")
+        dq_comm.double_ring_send_recv_q([dq], write_comm_buf, r + 1)
         dq_comm.commit()
         dq_comm.wait()
         dq = record_stream(*write_comm_buf)[0]
