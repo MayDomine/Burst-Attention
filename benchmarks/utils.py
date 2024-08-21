@@ -70,11 +70,12 @@ def ring(q, k, v):
     return res_ring
 
 
-def write_res(b, s, n, d, c, m, f, fb, file):
+def write_res(b, s, n, d, c, dr, m, f, fb, file):
     item = {
         "batch_size": b,
         "seqlen": s,
         "num_heads": n,
+        "double_ring": dr,
         "dim": d,
         "method": m,
         "forward": f,

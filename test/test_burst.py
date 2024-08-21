@@ -3,6 +3,7 @@ import torch
 import os
 import bmtrain as bmt
 import numpy as np
+import argparse
 
 sys.path.append("..")
 from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
@@ -74,15 +75,16 @@ def test_ring_comm():
     comm.wait()
 
 
-def get_group():
+def get_group(create_dq_group=True):
+    # if dq use the same group with q, g, lse, softmax_d, it wont pass the correctness pass in double_ring
     if bmt.init.is_initialized():
         return (
             bmt.config["comm"],
-            bmt.config["local_comm"],
-            bmt.config["local_idx_comm"],
+            (bmt.config["local_comm"], bmt.config["local_comm2"]),
+            (bmt.config["local_idx_comm"], bmt.config["local_idx_comm2"])
         )
     else:
-        local_size = get_world_size() // 2
+        local_size = get_world_size() // 4
         group_ranks = np.array(list(range(get_world_size())))
         intra_ranks = group_ranks.reshape(-1, local_size)
         inter_ranks = intra_ranks.transpose()
@@ -92,7 +94,17 @@ def get_group():
         inter_group, _ = torch.distributed.new_subgroups_by_enumeration(
             inter_ranks.tolist(), backend="nccl"
         )
-        return None, intra_group, inter_group
+        if create_dq_group:
+            intra_group2, _ = torch.distributed.new_subgroups_by_enumeration(
+                intra_ranks.tolist(), backend="nccl"
+            )
+            inter_group2, _ = torch.distributed.new_subgroups_by_enumeration(
+                inter_ranks.tolist(), backend="nccl"
+            )
+        if not create_dq_group:
+            return None, intra_group, inter_group
+        else:
+            return None, (intra_group, intra_group2,), (inter_group, inter_group2)
 
 
 def test_burst(
@@ -151,16 +163,57 @@ def test_burst(
     test_msg(check_helper, "Value Correctness Check", g_ref[2], grad_qkv1[2])
     test_msg(check_helper, "Key Correctness Check", g_ref[1], grad_qkv1[1])
     test_msg(check_helper, "Query Correctness Check", g_ref[0], grad_qkv1[0])
+    return 1
 
-
-if __name__ == "__main__":
-    torch.distributed.init_process_group(backend="nccl", init_method="env://")
-    torch.cuda.set_device(torch.distributed.get_rank())
-    # bmt.init_distributed()
-    # bmt.config['sp_stream'] = torch.cuda.Stream(-1)
-    for causal in [False]:
+def make_cmd():
+    for causal in [False, True]:
+        for optimize_bwd_comm in [True, False]:
+            for deterministic in [False, True]:
+                for double_ring in [True]:
+                    cmd = "torchrun --nnodes 1 --nproc_per_node 8 test_burst.py"
+                    if causal:
+                        cmd += " --causal"
+                    if optimize_bwd_comm:
+                        cmd += " --optimize_bwd_comm"
+                    if deterministic:
+                        cmd += " --deterministic"
+                    if double_ring:
+                        cmd += " --double_ring"
+                    print(cmd)
+def test_all():
+    for causal in [False, True]:
         for optimize_bwd_comm in [True, False]:
             for deterministic in [False, True]:
                 for double_ring in [True, False]:
-                    test_burst(causal, optimize_bwd_comm, deterministic, double_ring)
-    # test_ring_comm()
+                    success = test_burst(causal, optimize_bwd_comm, deterministic, double_ring)
+
+def bmt_init():
+    bmt.init_distributed()
+    bmt.config['sp_stream'] = torch.cuda.Stream(-1)
+    bmt.config['sp_stream2'] = torch.cuda.Stream(-1)
+    bmt.config['sp_stream3'] = torch.cuda.Stream(-1)
+    bmt.config['sp_stream4'] = torch.cuda.Stream(-1)
+
+
+def test_cli():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--causal", action="store_true")
+    parser.add_argument("--optimize_bwd_comm", action="store_true")
+    parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--double_ring", action="store_true")
+    parser.add_argument("--all", action="store_true")
+    args = parser.parse_args()
+    # torch.distributed.init_process_group(backend="nccl", init_method="env://")
+    # torch.cuda.set_device(torch.distributed.get_rank())
+    bmt_init()
+    if args.all:
+        test_all()
+    else:
+        test_burst(
+            args.causal,
+            args.optimize_bwd_comm,
+            args.deterministic,
+            args.double_ring,
+        )
+if __name__ == "__main__":
+    test_cli()

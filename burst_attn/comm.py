@@ -8,6 +8,7 @@ from .log_helper import get_logger
 
 _logger = get_logger(__file__, level="WARNING")
 
+
 def broadcast(tensor, src, group=None):
     if is_bmt_enable():
         return bmt.distributed.broadcast(tensor, src)
@@ -95,7 +96,7 @@ def get_rank(group=None):
 
 
 class Ring:
-    def __init__(self, process_group, local_group=[None, None]):
+    def __init__(self, process_group, local_group=[None, None], dq=False):
         if is_bmt_enable():
             if process_group:
                 self.comm = process_group
@@ -108,10 +109,25 @@ class Ring:
         self._wait_inter = False
         self.world_size = get_world_size(process_group)
         self.rank = get_rank(process_group)
-        status = "on" if local_group[0] else "off"
-        log_rank0(f"Double ring status: {status}")
+        self.event = torch.cuda.Event(enable_timing=False)
         self.local_group = local_group[0]
         self.local_group2 = local_group[1]
+        self.double_ring = True if local_group[0] else False
+        if self.double_ring and is_bmt_enable():
+            if dq:
+                self.intra_stream = bmt.config["sp_stream3"]
+                self.inter_stream = bmt.config["sp_stream4"]
+            else:
+                self.intra_stream = bmt.config["sp_stream"]
+                self.inter_stream = bmt.config["sp_stream2"]
+        elif is_bmt_enable():
+            if dq:
+                self.intra_stream = bmt.config['sp_stream2']
+                self.inter_stream = bmt.config['sp_stream2']
+            else:
+                self.intra_stream = bmt.config['sp_stream']
+                self.inter_stream = bmt.config['sp_stream']
+
         self.inter_rank = get_rank(self.local_group2)
         self.intra_rank = get_rank(self.local_group2)
         self.intra_size = get_world_size(self.local_group)
@@ -166,22 +182,19 @@ class Ring:
         def log_warn0(msg):
             if get_rank() == 0:
                 _logger.warn(msg)
+
         if self.local_group is None:
-            log_warn0("Disable double ring")
             self.double_ring_send_recv(tensor_list, dest_list, r)
         else:
             if r % self.intra_size == 1 and r != 1:
-                if not self.check_buffer(self.buffer_list, tensor_list): 
-                    log_warn0(f"first round inter-send-recv in round {r}")
+                if not self.check_buffer(self.buffer_list, tensor_list):
                     self.buffer_list = [torch.empty_like(t) for t in tensor_list]
                     self._inter_ops += self._make_ring_ops(
                         tensor_list, self.buffer_list, self.local_group2
                     )
                 else:
-                    log_warn0(f"wait inter in round {r} (meanwhile do tensor + recv_tensor)")
-                    self._wait_inter = True
-                    self.wait()
-                    add_list = [t+b for t,b in zip(tensor_list, self.buffer_list)]
+                    self.wait(True)
+                    add_list = [t + b for t, b in zip(tensor_list, self.buffer_list)]
                     self._inter_ops += self._make_ring_ops(
                         add_list, self.buffer_list, self.local_group2
                     )
@@ -189,20 +202,15 @@ class Ring:
                     for i in range(len(dest_list)):
                         dest_list[i].zero_()
                 else:
-                    log_warn0(f"last round inter-send-recv in round {r}, dest_list = buffer_list")
                     self.commit()
                     self.wait(True)
-                    self._ring_send_recv_base(self.buffer_list, dest_list, self.local_group)
+                    self._ring_send_recv_base(
+                        self.buffer_list, dest_list, self.local_group
+                    )
                     self.commit()
                     self.wait()
             else:
                 self._ring_send_recv_base(tensor_list, dest_list, self.local_group)
-                
-            # q ring send recv starts from r=2
-            # if r % self.intra_size == 1, it 
-            # means that this is last round of intra ring 
-
-
 
 
     def double_ring_send_recv(self, tensor_list, dest_list, r=0):
@@ -214,7 +222,7 @@ class Ring:
             self._ring_send_recv_base(tensor_list, dest_list)
         else:
             if r % self.intra_size == 1 and r // self.intra_size != self.inter_size - 1:
-                if not self.check_buffer(self.buffer_list, tensor_list): 
+                if not self.check_buffer(self.buffer_list, tensor_list):
                     self.buffer_list = [torch.empty_like(t) for t in tensor_list]
                 self._inter_ops += self._make_ring_ops(
                     tensor_list, self.buffer_list, self.local_group2
@@ -223,7 +231,6 @@ class Ring:
                 if not self.check_buffer(self.buffer_list, dest_list):
                     self.buffer_list = [t.clone().detach() for t in tensor_list]
                     self._dest_list = dest_list
-                    
 
                 assert (
                     len(dest_list) == len(self.buffer_list)
@@ -253,20 +260,24 @@ class Ring:
         if self.backend == "torch":
             reqs = dist.batch_isend_irecv(ops)
         else:
+            current_stream = torch.cuda.current_stream()
+            current_stream.record_event(self.event)
             with torch.cuda.stream(stream):
+                self.event.synchronize()
                 for op in ops:
                     op.tensor.record_stream(stream)
                 groupStart()
                 for op in ops:
                     op()
                 groupEnd()
+                stream.record_event(self.event)
             reqs = [None]
         return reqs
 
     def commit(self):
         if len(self.ops) > 0:
             stream = (
-                bmt.config["sp_stream"]
+                self.intra_stream
                 if self.backend != "torch" and "sp_stream" in bmt.config
                 else None
             )
@@ -275,21 +286,16 @@ class Ring:
         if len(self._inter_ops) > 0:
             self._inter_reqs += self._commit_ops(
                 self._inter_ops,
-                bmt.config["sp_stream2"] if self.backend != "torch" else None,
+                self.inter_stream if self.backend != "torch" else None,
             )
             self._inter_ops = []
 
     def wait(self, force_wait_inter=False):
-        self._wait_base()
         if self._wait_inter or force_wait_inter:
             self._wait_base(True)
-            # if self._inter_src is not None:
-            #     self._inter_ops += self._make_ring_ops(
-            #         self._inter_src, self.buffer_list, self.local_group2
-            #     )
-            # self._inter_src = None # avoid memory leak
             self._wait_inter = False
-        
+        else:
+            self._wait_base()
 
     def _wait_base(self, wait_inter_comm=False):
         if self.backend == "torch":
@@ -298,13 +304,13 @@ class Ring:
                 req.wait()
         else:
             if not wait_inter_comm:
-                torch.cuda.current_stream().wait_stream(bmt.config["sp_stream"])
+                torch.cuda.current_stream().wait_stream(self.intra_stream)
             else:
-                torch.cuda.current_stream().wait_stream(bmt.config["sp_stream2"])
+                torch.cuda.current_stream().wait_stream(self.inter_stream)
         if wait_inter_comm:
             self._inter_reqs = []
-
-        self.reqs = []
+        else:
+            self.reqs = []
 
 
 def print_rank(*args, **kwargs):

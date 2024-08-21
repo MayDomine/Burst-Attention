@@ -132,6 +132,13 @@ class OpBurstAttn(torch.autograd.Function):
         acc_o = None
         lse_i = None
         ctx.deterministic = deterministic
+        if isinstance(double_group[0], tuple):
+            dq_group = (double_group[0][1], double_group[1][1])
+            double_group = (double_group[0][0], double_group[1][0])
+            ctx.dq_group = dq_group
+        else:
+            # dq share same group with other tensors in backward
+            ctx.dq_group = None
         assert (
             not causal or flash == "cuda"
         ), "Causal attention only supported for Flash v2"
@@ -202,7 +209,7 @@ class OpBurstAttn(torch.autograd.Function):
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
         group, double_group = ctx.process_group, ctx.double_group
-        dq_comm = Ring(group, double_group)
+        dq_comm = Ring(group, ctx.dq_group if ctx.dq_group is not None else double_group)
         burst_comm = Ring(group, double_group)
         if not ctx.optimize_bwd_comm:
             delta = o_i.contiguous()
@@ -216,6 +223,7 @@ class OpBurstAttn(torch.autograd.Function):
             )
 
         sp_count = burst_comm.world_size
+        inter_size = burst_comm.inter_size
         half_seqlen = q.shape[1] // 2 if ctx.flash else q.shape[2] // 2
         dqkv_buf = [torch.empty_like(t) for t in [dq, dk, dv]]
         if ctx.causal:
@@ -312,7 +320,7 @@ class OpBurstAttn(torch.autograd.Function):
             if r != 1:
                 dq_comm.wait()
                 recv, write_comm_buf = record_stream(*write_comm_buf), [dq]
-                dq = recv[0].clone().contiguous()
+                dq = recv[0]
             if r == 1 or not ctx.causal:
                 dq += dqkv_buf[0]
                 dk += dqkv_buf[1]
@@ -326,7 +334,7 @@ class OpBurstAttn(torch.autograd.Function):
                 dk[:, :half_seqlen] += dk0
                 dv[:, :half_seqlen] += dv0
         record.append(get_partition_id(double_group, r+1))
-        _logger.warn(f"Backward Record of rank {get_rank()}: {record}")
+        _logger.info(f"Backward Record of rank {get_rank()}: {record}")
         dq_comm.double_ring_send_recv_q([dq], write_comm_buf, r + 1)
         dq_comm.commit()
         dq_comm.wait()
