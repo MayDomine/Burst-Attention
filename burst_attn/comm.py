@@ -8,6 +8,10 @@ from .log_helper import get_logger
 
 _logger = get_logger(__file__, level="WARNING")
 
+def replicate(tensor):
+    res = torch.empty_like(tensor)
+    res.copy_(tensor)
+    return res
 
 def broadcast(tensor, src, group=None):
     if is_bmt_enable():
@@ -67,6 +71,8 @@ def all_reduce(t, group=None):
         group = bmt.config["comm"] if not group else group
         allReduce(t.storage(), t.storage(), "sum", group)
 
+def get_local_world_size():
+    return bmt.config["local_world_size"] if is_bmt_enable() else int(os.environ.get("LOCAL_WORLD_SIZE", 1))
 
 def get_world_size(c=None):
     if not is_bmt_enable():
@@ -189,8 +195,11 @@ class Ring:
             if r % self.intra_size == 1 and r != 1:
                 if not self.check_buffer(self.buffer_list, tensor_list):
                     self.buffer_list = [torch.empty_like(t) for t in tensor_list]
+                    send_buffer = [torch.empty_like(t) for t in tensor_list]
+                    for i in range(len(tensor_list)):
+                        send_buffer[i].copy_(tensor_list[i])
                     self._inter_ops += self._make_ring_ops(
-                        tensor_list, self.buffer_list, self.local_group2
+                        send_buffer, self.buffer_list, self.local_group2
                     )
                 else:
                     self.wait(True)
@@ -224,12 +233,15 @@ class Ring:
             if r % self.intra_size == 1 and r // self.intra_size != self.inter_size - 1:
                 if not self.check_buffer(self.buffer_list, tensor_list):
                     self.buffer_list = [torch.empty_like(t) for t in tensor_list]
+                send_buffer = [torch.empty_like(t) for t in tensor_list]
+                for i in range(len(tensor_list)):
+                    send_buffer[i].copy_(tensor_list[i])
                 self._inter_ops += self._make_ring_ops(
-                    tensor_list, self.buffer_list, self.local_group2
+                    send_buffer, self.buffer_list, self.local_group2
                 )
             if r % self.intra_size == 0 and r != 0:
                 if not self.check_buffer(self.buffer_list, dest_list):
-                    self.buffer_list = [t.clone().detach() for t in tensor_list]
+                    self.buffer_list = [replicate(t) for t in tensor_list]
                     self._dest_list = dest_list
 
                 assert (

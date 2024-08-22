@@ -10,15 +10,27 @@ from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
 from burst_attn.comm import synchronize, get_rank, get_world_size
 from checker import check_helper
 from burst_attn import OpBurstAttn
-from burst_attn.comm import Ring, get_rank, get_world_size, print_rank, gather_obj, broadcast
+from burst_attn.comm import (
+    Ring,
+    get_rank,
+    get_world_size,
+    print_rank,
+    gather_obj,
+    broadcast,
+    get_local_world_size,
+)
 from burst_attn.log_helper import get_logger
-_logger = get_logger(__file__, level="DEBUG")
+
+error_log = "error_log.txt"
+_logger = get_logger(__file__, level="DEBUG", log_file=error_log)
 
 def test_msg(test_func, msg, *args, **kwargs):
     try:
         e = test_func(*args, **kwargs)
         success = 1
     except Exception as e:
+        if get_rank() == 0:
+            _logger.error(f"Error in {msg}: {e}")
         success = 0
     res = gather_obj(success)
     if get_rank() == 0:
@@ -58,9 +70,27 @@ def test(q, k, v, func, grad_output):
     return o, (gq, gk, gv)
 
 
-def burst_func(q, k, v, causal=False, optimize_bwd_comm=False, deterministic=False, group=None, sub_group=[None,None]):
+def burst_func(
+    q,
+    k,
+    v,
+    causal=False,
+    optimize_bwd_comm=False,
+    deterministic=False,
+    group=None,
+    sub_group=[None, None],
+):
     return OpBurstAttn.apply(
-        q, k, v, None, "cuda", causal, optimize_bwd_comm, deterministic, group, sub_group
+        q,
+        k,
+        v,
+        None,
+        "cuda",
+        causal,
+        optimize_bwd_comm,
+        deterministic,
+        group,
+        sub_group,
     )
 
 
@@ -81,10 +111,10 @@ def get_group(create_dq_group=True):
         return (
             bmt.config["comm"],
             (bmt.config["local_comm"], bmt.config["local_comm2"]),
-            (bmt.config["local_idx_comm"], bmt.config["local_idx_comm2"])
+            (bmt.config["local_idx_comm"], bmt.config["local_idx_comm2"]),
         )
     else:
-        local_size = get_world_size() // 4
+        local_size = get_local_world_size()
         group_ranks = np.array(list(range(get_world_size())))
         intra_ranks = group_ranks.reshape(-1, local_size)
         inter_ranks = intra_ranks.transpose()
@@ -104,7 +134,14 @@ def get_group(create_dq_group=True):
         if not create_dq_group:
             return None, intra_group, inter_group
         else:
-            return None, (intra_group, intra_group2,), (inter_group, inter_group2)
+            return (
+                None,
+                (
+                    intra_group,
+                    intra_group2,
+                ),
+                (inter_group, inter_group2),
+            )
 
 
 def test_burst(
@@ -117,7 +154,8 @@ def test_burst(
     print_rank(
         f"Checking Burst Attn Causal = {causal}... Optimize Bwd Comm = {optimize_bwd_comm}... Deterministic = {deterministic}... Double Ring = {double_ring}..."
     )
-    b, s, n, d = 2, 2048, 32, 128
+    b, s, n, d = 2, 256, 32, 128
+    s = s * get_world_size()
     qkv = torch.randn(b, s * 3, n, d, dtype=torch.float16).cuda()
     grad_output = torch.randn(b, s, n, d, dtype=torch.float16).cuda()
     synchronize()
@@ -148,7 +186,7 @@ def test_burst(
         optimize_bwd_comm,
         deterministic,
         group,
-        [intra_g, inter_g]
+        [intra_g, inter_g],
     )
     grad_qkv1 = torch.autograd.grad(o1, qkv1, grad_output)
     # o1, grad_qkv1 = test(qkv1[0], qkv1[1], qkv1[2], burst_func, grad_output)
@@ -165,6 +203,7 @@ def test_burst(
     test_msg(check_helper, "Query Correctness Check", g_ref[0], grad_qkv1[0])
     return 1
 
+
 def make_cmd():
     for causal in [False, True]:
         for optimize_bwd_comm in [True, False]:
@@ -180,19 +219,24 @@ def make_cmd():
                     if double_ring:
                         cmd += " --double_ring"
                     print(cmd)
+
+
 def test_all():
     for causal in [False, True]:
         for optimize_bwd_comm in [True, False]:
             for deterministic in [False, True]:
                 for double_ring in [True, False]:
-                    success = test_burst(causal, optimize_bwd_comm, deterministic, double_ring)
+                    success = test_burst(
+                        causal, optimize_bwd_comm, deterministic, double_ring
+                    )
+
 
 def bmt_init():
     bmt.init_distributed()
-    bmt.config['sp_stream'] = torch.cuda.Stream(-1)
-    bmt.config['sp_stream2'] = torch.cuda.Stream(-1)
-    bmt.config['sp_stream3'] = torch.cuda.Stream(-1)
-    bmt.config['sp_stream4'] = torch.cuda.Stream(-1)
+    bmt.config["sp_stream"] = torch.cuda.Stream(-1)
+    bmt.config["sp_stream2"] = torch.cuda.Stream(-1)
+    bmt.config["sp_stream3"] = torch.cuda.Stream(-1)
+    bmt.config["sp_stream4"] = torch.cuda.Stream(-1)
 
 
 def test_cli():
@@ -202,10 +246,13 @@ def test_cli():
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--double_ring", action="store_true")
     parser.add_argument("--all", action="store_true")
+    parser.add_argument("--backend", type=str, default="torch")
     args = parser.parse_args()
-    # torch.distributed.init_process_group(backend="nccl", init_method="env://")
-    # torch.cuda.set_device(torch.distributed.get_rank())
-    bmt_init()
+    if args.backend == "torch":
+        torch.distributed.init_process_group(backend="nccl", init_method="env://")
+        torch.cuda.set_device(torch.distributed.get_rank() % 8)
+    else:
+        bmt_init()
     if args.all:
         test_all()
     else:
@@ -215,5 +262,7 @@ def test_cli():
             args.deterministic,
             args.double_ring,
         )
+
+
 if __name__ == "__main__":
     test_cli()

@@ -47,7 +47,7 @@ def get_setting():
             for num_heads in setting["num_heads"]:
                 for dim in setting["dim"]:
                     for causal in setting["causal"]:
-                        for double_ring in setting["double_ring"]:
+                        for double_ring in double_ring_setting:
                             yield (
                                 batch_size,
                                 seqlen,
