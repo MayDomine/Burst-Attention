@@ -2,7 +2,7 @@ import math
 import torch
 import bmtrain as bmt
 from ring_attn import RingQK, RingAV
-from burst_attn import OpBurstAttn
+from burst_attn import burst_attn_func, burst_attn_func_striped
 from burst_attn.comm import get_rank
 import torch.distributed as dist
 from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
@@ -59,7 +59,7 @@ def flash(q, k, v, causal=False):
 
 
 def burst(q, k, v, group=None, causal=False, opt_bwd=True, deterministic=False):
-    res_burst = OpBurstAttn.apply(
+    res_burst = burst_attn_func(
         q, k, v, None, "cuda", causal, opt_bwd, deterministic, None
     )
     return res_burst
@@ -70,17 +70,17 @@ def ring(q, k, v):
     return res_ring
 
 
-def write_res(b, s, n, d, c, dr, m, f, fb, file):
+def write_res(b, s, n, d, causal, double_ring, opt_bwd, method, foward_t, fb_t, file):
     item = {
         "batch_size": b,
         "seqlen": s,
         "num_heads": n,
-        "double_ring": dr,
+        "double_ring": double_ring,
         "dim": d,
-        "method": m,
-        "forward": f,
-        "forward_backward": fb,
-        "causal": c,
+        "method": method,
+        "forward": foward_t,
+        "forward_backward": fb_t,
+        "causal": causal,
     }
     if get_rank() == 0:
         file.write(item)

@@ -162,11 +162,15 @@ def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0, causal=False):
         o = o_i.to(torch.float32)
         lse = lse_i.transpose(-2, -1).unsqueeze(dim=-1).contiguous()
     else:
-        if q.shape[1] < k.shape[1]:
+        if q.shape[1] == k.shape[1] // 2:
             half_seqlen = o.shape[1] // 2
 
             o[:, half_seqlen:], lse[:, half_seqlen:] = cuda_scale_out_lse_helper(
                 o[:, half_seqlen:], lse[:, half_seqlen:], o_i, lse_i
+            )
+        elif lse.shape[1] == lse_i.shape[2] + 1:
+            o[:, 1:], lse[:, 1:] = cuda_scale_out_lse_helper(
+                o[:, 1:], lse[:, 1:], o_i, lse_i
             )
         else:
             o, lse = cuda_scale_out_lse_helper(o, lse, o_i, lse_i)

@@ -185,10 +185,6 @@ class Ring:
         return flag
 
     def double_ring_send_recv_q(self, tensor_list, dest_list, r=0):
-        def log_warn0(msg):
-            if get_rank() == 0:
-                _logger.warn(msg)
-
         if self.local_group is None:
             self.double_ring_send_recv(tensor_list, dest_list, r)
         else:

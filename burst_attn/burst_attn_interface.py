@@ -37,11 +37,6 @@ def get_partition_id(double_group, r):
     return round_r
 
 
-def log_rank0(*args, **kwargs):
-    if get_rank() == 0:
-        _logger.warn(*args, **kwargs)
-
-
 def attn_forward(flash, q, k, v, m_i, lse_i, acc_o, scale, bias, causal=False):
     assert not causal or flash == "cuda", "Causal attention only supported for Flash v2"
     if flash == "triton":
@@ -456,7 +451,7 @@ class OpBurstAttnStrip(torch.autograd.Function):
         record = []
         for r in range(1, sp_count + 1):
             round_r = get_partition_id(double_group, r)
-            causal_shift = round_r <= burst_comm.rank
+            causal_shift = round_r > burst_comm.rank
             record.append(round_r)
             if r != sp_count:
                 burst_comm.double_ring_send_recv([k, v], comm_bufs, r)
@@ -476,6 +471,7 @@ class OpBurstAttnStrip(torch.autograd.Function):
                     acc_o,
                     ctx.softmax_scale,
                     None,
+                    causal,
                 )
 
             if ctx.flash != "cuda":
@@ -530,7 +526,7 @@ class OpBurstAttnStrip(torch.autograd.Function):
         for r in range(1, sp_count + 1):
             round_r = get_partition_id(double_group, r)
             record.append(round_r)
-            causal_shift = round_r <= burst_comm.rank
+            causal_shift = round_r <= burst_comm.rank and r != 1
             if r != sp_count:
                 burst_comm.double_ring_send_recv(
                     [delta, grad_output, q, lse_i], read_comm_buf, r
@@ -560,10 +556,11 @@ class OpBurstAttnStrip(torch.autograd.Function):
                 )
             elif causal_shift:
                 if ctx.optimize_bwd_comm:
-                    d = delta[:, :, 1:]
+                    d = torch.zeros_like(delta)
+                    d[:,:, :-1].copy_(delta[:, :, 1:])
                 else:
                     d = delta[:, 1:]
-                lse = lse_i[:, :, :-1]
+                lse = lse_i[:, :, 1:].contiguous()
                 if ctx.flash:
                     g = grad_output[:, 1:]
                 else:
@@ -576,12 +573,12 @@ class OpBurstAttnStrip(torch.autograd.Function):
                     v[:, :-1],
                     d,
                     lse,
-                    dqkv_buf[0],
-                    dqkv_buf[1],
-                    dqkv_buf[2],
+                    dqkv_buf[0][:, 1:],
+                    dqkv_buf[1][:, 1:],
+                    dqkv_buf[2][:, 1:],
                     ctx.softmax_scale,
                     None,
-                    False,
+                    ctx.causal,
                     cuda_args={
                         "deterministic": ctx.deterministic,
                     },
@@ -603,9 +600,9 @@ class OpBurstAttnStrip(torch.autograd.Function):
                 dk += dqkv_buf[1]
                 dv += dqkv_buf[2]
             elif causal_shift:
-                dq[:, 1:] += dqkv_buf[0]
-                dk[:, :-1] += dqkv_buf[1]
-                dv[:, :-1] += dqkv_buf[2]
+                dq[:, 1:] += dqkv_buf[0][:, 1:]
+                dk[:, :-1] += dqkv_buf[1][:, 1:]
+                dv[:, :-1] += dqkv_buf[2][:, 1:]
         record.append(get_partition_id(double_group, r + 1))
         _logger.info(f"Backward Record of rank {get_rank()}: {record}")
         dq_comm.double_ring_send_recv_q([dq], write_comm_buf, r + 1)

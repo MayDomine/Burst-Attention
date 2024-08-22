@@ -2,19 +2,19 @@ import torch
 import os
 import bmtrain as bmt
 import jsonlines as jl
-from utils import write_res, generate_inp, backward, ref_attn, flash, burst, ring
+from utils import write_res, generate_inp, backward, ref_attn, flash,  ring
 from burst_attn.comm import get_world_size, print_rank, get_rank
 import math
 import torch.utils.benchmark as benchmark
 import torch.distributed as dist
-from burst_attn import OpBurstAttn
+from burst_attn import burst_attn_func, burst_attn_func_striped
 import numpy as np
 
 setting = {}
-num_iter = 10
+num_iter = 50
 
 
-def flops(batch, seqlen, nheads, headdim, causal, double_ring=False, mode="fwd"):
+def flops(batch, seqlen, nheads, headdim, causal,  mode="fwd"):
     assert mode in ["fwd", "bwd", "fwd_bwd"]
     f = 4 * batch * seqlen**2 * nheads * headdim // (2 if causal else 1)
     return f if mode == "fwd" else (2.5 * f if mode == "bwd" else 3.5 * f)
@@ -27,12 +27,14 @@ def efficiency(flop, time):
 def init_setting():
     setting["batch_size"] = [5]
     # 8k each gpu and 4k each gpu
-    # setting["seqlen"] = [1024 * 4 * get_world_size(), 1024 * 4 * get_world_size()]
-    setting["seqlen"] = [1024 * 4 * get_world_size()]
+    setting["seqlen"] = [1024 * 4 * get_world_size(), 1024 * 8 * get_world_size()]
+    # setting["seqlen"] = [1024 * 4 * get_world_size()]
     setting["num_heads"] = [32]
     setting["dim"] = [128]
     setting["causal"] = [True, False]
     setting["double_ring"] = [True, False]
+    setting["bwd_opt"] = [True, False]
+
 
 
 def get_setting():
@@ -47,19 +49,20 @@ def get_setting():
             for num_heads in setting["num_heads"]:
                 for dim in setting["dim"]:
                     for causal in setting["causal"]:
-                        for double_ring in double_ring_setting:
-                            yield (
-                                batch_size,
-                                seqlen,
-                                num_heads,
-                                dim,
-                                causal,
-                                double_ring,
-                            )
+                        for bwd_opt in setting['bwd_opt']:
+                            for double_ring in double_ring_setting:
+                                yield (
+                                    batch_size,
+                                    seqlen,
+                                    num_heads,
+                                    dim,
+                                    causal,
+                                    double_ring,
+                                    bwd_opt
+                                )
 
 
 mapping = {
-    "burst": burst,
     "flash": flash,
     "normal": ref_attn,
     "ring": ring,
@@ -138,31 +141,33 @@ def benchmark_backward(
 
 
 def benchmark_one_setting(method, settings):
-    b, s, n, d, causal, double_ring = settings
+    b, seqlen, n, d, causal, double_ring, opt_bwd = settings
 
-    if method in ["flash", "burst"] or method.startswith("burst"):
-        if method in ["burst"]:
-            s = s // get_world_size()
-        shape = (b, s, n, d)
+    if method == "flash":
+        shape = (b, seqlen, n, d)
+    elif method.startswith("burst"):
+        shape = (b, seqlen//get_world_size(), n, d)
     elif method in ["normal", "ring"]:
         if method == "ring":
-            s = s // get_world_size()
-        shape = (b, n, s, d)
+            s_per_device = seqlen // get_world_size()
+        shape = (b, n, s_per_device, d)
 
     torch.cuda.synchronize()
     forward_func = mapping[method]
     inp = generate_inp(*shape)
     for _ in range(num_iter):
-        if method in ["flash", "burst"]:
+        if method in ["flash"]:
             forward_func(*inp, causal=causal)
+        elif method.startswith("burst"):
+            forward_func(*inp, causal=causal, double_ring=double_ring, opt_bwd=opt_bwd)
         else:
             forward_func(*inp)
     # print_rank("warmup")
-    if method == "burst":
-        kwarg = {"double_ring": double_ring}
-    else:
-        kwarg = {}
-    if method in ["flash", "burst"]:
+    kwargs = {}
+    if method in ["burst", "burst_striped"]:
+        kwargs["double_ring"] = double_ring
+        kwargs['opt_bwd'] = opt_bwd
+    if method in ["flash", "burst", "burst_striped"]:
         _, forward_time = benchmark_forward(
             forward_func,
             *inp,
@@ -170,7 +175,7 @@ def benchmark_one_setting(method, settings):
             desc=method,
             verbose=False,
             repeats=num_iter,
-            **kwarg,
+            **kwargs,
         )
         _, backward_time = benchmark_backward(
             forward_func,
@@ -179,7 +184,7 @@ def benchmark_one_setting(method, settings):
             desc=method,
             verbose=False,
             repeats=num_iter,
-            **kwarg,
+            **kwargs
         )
     else:
         _, forward_time = benchmark_forward(
@@ -191,19 +196,19 @@ def benchmark_one_setting(method, settings):
     forward_time = forward_time.mean
     backward_time = backward_time.mean
     forward_backward_time = forward_time + backward_time
-    title = "batch_size|seqlen|num_heads|dim|causal|double_ring"
-    s = "|".join([str(x) for x in settings])
-    s = "|".join("{:^16s}".format(x) for x in s.split("|"))
+    title = "batch_size|seqlen|num_heads|dim|causal|double_ring|opt_bwd"
+    head = "|".join([str(x) for x in settings])
+    head = "|".join("{:^16s}".format(x) for x in head.split("|"))
     title = "|".join("{:^16s}".format(x) for x in title.split("|"))
-    s = title + "\n\t" + s
-    ratio = get_world_size() if method == "burst" else 1
-    fwd_tflops = efficiency(flops(*settings, mode="fwd"), forward_time) / ratio
+    head = title + "\n\t" + head
+    ratio = get_world_size() if method != "flash" else 1
+    fwd_tflops = efficiency(flops(b, seqlen, n, d, causal, mode="fwd"), forward_time) / ratio
     fwd_bwd_tflops = (
-        efficiency(flops(*settings, mode="fwd_bwd"), forward_backward_time) / ratio
+        efficiency(flops(b, seqlen, n, d, causal, mode="fwd_bwd"), forward_backward_time) / ratio
     )
-    bwd_tflops = efficiency(flops(*settings, mode="bwd"), backward_time) / ratio
+    bwd_tflops = efficiency(flops(b, seqlen, n, d, causal, mode="bwd"), backward_time) / ratio
     print_rank(
-        f"{method}\n\t{s}\n\tTime: | forward: {forward_time:.2f} s | forward_backward: {forward_backward_time:.2f} s"
+        f"{method}\n\t{head}\n\tTime: | forward: {forward_time:.2f} s | forward_backward: {forward_backward_time:.2f} s"
     )
     print_rank(
         f"\tTFLOPS| | forward: {fwd_tflops:.2f} TFLOPS | forward_backward: {fwd_bwd_tflops:.2f} TFLOPS | backward: {bwd_tflops:.2f} TFLOPS"
@@ -234,15 +239,9 @@ def local_global_mesh(group, local_size):
 
     return group1, group2
 
-
-def run_bench_torch():
-    # bmt.init_distributed()
-    group = dist.init_process_group(backend="nccl")
-    local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
-    world_size = dist.get_world_size()
-    init_setting()
+def get_burst_func(is_striped=False):
     all_group = get_group()
-    def burst(
+    def wrapper(
         q,
         k,
         v,
@@ -256,7 +255,8 @@ def run_bench_torch():
             group, intra_g, inter_g = all_group
         else:
             group, intra_g, inter_g = None, None, None
-        res_burst = OpBurstAttn.apply(
+        func = burst_attn_func if not is_striped else burst_attn_func_striped
+        res_burst = func(
             q,
             k,
             v,
@@ -269,17 +269,33 @@ def run_bench_torch():
             [intra_g, inter_g],
         )
         return res_burst
+    return wrapper
 
-    mapping["burst"] = burst
+def run_bench_torch():
+    # bmt.init_distributed()
+    group = dist.init_process_group(backend="nccl")
+    local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    world_size = dist.get_world_size()
+    init_setting()
+    burst_func = get_burst_func()
+    burst_striped = get_burst_func(True)
+    mapping["burst"] = burst_func
+    mapping["burst_striped"] = burst_striped
+
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     fi = jl.open("results_torch.jsonl", "a")
-    for i, s in enumerate(get_setting()):
+    for i, setting in enumerate(get_setting()):
+        b, s, n, d, causal, double_ring, bwd_opt = setting
         for method in [
+            "burst_striped",
             "burst",
             "flash",
         ]:
-            f, fb = benchmark_one_setting(method, s)
-            write_res(*s, method, f, fb, fi)
+            if method == "burst_striped" and not causal:
+                continue
+
+            f, fb = benchmark_one_setting(method, setting)
+            write_res(*setting, method, f, fb, fi)
     fi.close()
 
 
@@ -331,43 +347,21 @@ def run_bench_bmt():
     bmt.config["sp_stream3"] = torch.cuda.Stream(-1)
     bmt.config["sp_stream4"] = torch.cuda.Stream(-1)
     fi = jl.open("results_bmt.jsonl", "a")
+    burst_func = get_burst_func()
+    burst_striped = get_burst_func(True)
 
-    def burst(
-        q,
-        k,
-        v,
-        group=None,
-        causal=False,
-        opt_bwd=True,
-        deterministic=False,
-        double_ring=False,
-    ):
-        if double_ring:
-            group, intra_g, inter_g = get_group()
-        else:
-            group, intra_g, inter_g = None, None, None
-        res_burst = OpBurstAttn.apply(
-            q,
-            k,
-            v,
-            None,
-            "cuda",
-            causal,
-            opt_bwd,
-            deterministic,
-            group,
-            [intra_g, inter_g],
-        )
-        return res_burst
-
-    mapping["burst"] = burst
-    for i, s in enumerate(get_setting()):
-        for method in ["burst", "flash"]:
-            f, fb = benchmark_one_setting(method, s)
-            write_res(*s, method, f, fb, fi)
+    mapping["burst"] = burst_func
+    mapping["burst_striped"] = burst_striped
+    for i, settings in enumerate(get_setting()):
+        b, s, n, d, causal, double_ring, bwd_opt = settings
+        for method in ["burst", "flash", "burst_striped"]:
+            if method == "burst_striped" and not causal:
+                continue
+            f, fb = benchmark_one_setting(method, settings)
+            write_res(*settings, method, f, fb, fi)
     fi.close()
 
 
 if __name__ == "__main__":
-    run_bench_bmt()
-    # run_bench_torch()
+    # run_bench_bmt()
+    run_bench_torch()

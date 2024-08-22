@@ -20,11 +20,11 @@ pip install .
 BurstAttention supports both Torch and BMTrain as backends. You can initialize and apply BurstAttention in your project as follows:
 
 ```python
-from burst_attn import OpBurstAttn
+from burst_attn import burst_attn_func
 bmt.init_distributed() # Initialize BMTrain here if you are uing BMTrain as backend
 torch.distributed.init_process_group(backend='nccl') # Initialize Torch here if you are using Torch as backend
 # Initialize Q, K, V tensors here
-OpBurstAttn.apply(q, k, v, softmax_scale, flash, causal, optimize_bwd_comm, deterministic, process_group=None) # global group are using by default if you do not pass process_group 
+burst_attn_func(q, k, v, softmax_scale, flash, causal, optimize_bwd_comm, deterministic, process_group=None) # global group are using by default if you do not pass process_group 
 # process_group can be bmt.nccl.Communicator or torch.distributed.Process_group 
 ```
 

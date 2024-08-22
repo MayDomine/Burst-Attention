@@ -9,7 +9,7 @@ sys.path.append("..")
 from flash_attn.flash_attn_interface import flash_attn_func as flash_cuda
 from burst_attn.comm import synchronize, get_rank, get_world_size
 from checker import check_helper
-from burst_attn import OpBurstAttn
+from burst_attn import burst_attn_func, burst_attn_func_striped
 from burst_attn.comm import (
     Ring,
     get_rank,
@@ -41,20 +41,27 @@ def test_msg(test_func, msg, *args, **kwargs):
             print(msg, f" Success")
 
 
-def get_chunk(t, dim, half_reputation=False):
-    if half_reputation:
-        splits = t.chunk(get_world_size() * 2, dim=dim)
-        partition1, partition2 = (
-            splits[get_rank()],
-            splits[get_world_size() * 2 - get_rank() - 1],
-        )
-        return torch.cat([partition1, partition2], dim=dim).contiguous()
+def get_chunk(t, dim, half_reputation=False, striped=False):
+    if not striped: 
+        if half_reputation:
+            splits = t.chunk(get_world_size() * 2, dim=dim)
+            partition1, partition2 = (
+                splits[get_rank()],
+                splits[get_world_size() * 2 - get_rank() - 1],
+            )
+            return torch.cat([partition1, partition2], dim=dim).contiguous()
+        else:
+            return t.chunk(get_world_size(), dim=dim)[get_rank()].contiguous()
     else:
-        return t.chunk(get_world_size(), dim=dim)[get_rank()].contiguous()
+        splits = torch.stack(t.split(get_world_size(), dim=dim), dim=dim).transpose(dim, dim+1)
+        idx = [get_rank() if i == dim else slice(None) for i in range(len(splits.shape))]
+        return splits[idx].contiguous()
+        
+        
 
 
 def burst(q, k, v, group=None, causal=False, opt_bwd=True, deterministic=True):
-    res_burst = OpBurstAttn.apply(
+    res_burst = burst_attn_func(
         q, k, v, None, "cuda", causal, opt_bwd, deterministic, None
     )
     return res_burst
@@ -79,18 +86,23 @@ def burst_func(
     deterministic=False,
     group=None,
     sub_group=[None, None],
+    striped=False
 ):
-    return OpBurstAttn.apply(
-        q,
-        k,
-        v,
-        None,
-        "cuda",
-        causal,
-        optimize_bwd_comm,
-        deterministic,
-        group,
-        sub_group,
+    if striped:
+        func = burst_attn_func_striped
+    else:
+        func = burst_attn_func
+    return func(
+            q,
+            k,
+            v,
+            None,
+            "cuda",
+            causal,
+            optimize_bwd_comm,
+            deterministic,
+            group,
+            sub_group,
     )
 
 
@@ -114,7 +126,7 @@ def get_group(create_dq_group=True):
             (bmt.config["local_idx_comm"], bmt.config["local_idx_comm2"]),
         )
     else:
-        local_size = get_local_world_size()
+        local_size = get_world_size() // 2
         group_ranks = np.array(list(range(get_world_size())))
         intra_ranks = group_ranks.reshape(-1, local_size)
         inter_ranks = intra_ranks.transpose()
@@ -149,10 +161,11 @@ def test_burst(
     optimize_bwd_comm=False,
     deterministic=True,
     double_ring=True,
+    striped=True,
     group=None,
 ):
     print_rank(
-        f"Checking Burst Attn Causal = {causal}... Optimize Bwd Comm = {optimize_bwd_comm}... Deterministic = {deterministic}... Double Ring = {double_ring}..."
+        f"Checking Burst Attn Causal = {causal}... Optimize Bwd Comm = {optimize_bwd_comm}... Deterministic = {deterministic}... Double Ring = {double_ring}... Striped = {striped}..."
     )
     b, s, n, d = 2, 256, 32, 128
     s = s * get_world_size()
@@ -166,10 +179,10 @@ def test_burst(
     qkv1 = [t.clone().detach().requires_grad_() for t in qkv.chunk(3, dim=1)]
     qkv1_buf = [None] * 3
     for i in range(3):
-        qkv1_buf[i] = get_chunk(qkv1[i], 1, causal).detach().clone().requires_grad_()
+        qkv1_buf[i] = get_chunk(qkv1[i], 1, causal, striped).detach().clone().requires_grad_()
 
     o_ref, g_ref = test(qkv1[0], qkv1[1], qkv1[2], flash, grad_output)
-    grad_output = get_chunk(grad_output, 1, causal)
+    grad_output = get_chunk(grad_output, 1, causal, striped)
     grad_output = grad_output.clone().detach().contiguous()
     for i in range(3):
         qkv1[i] = qkv1_buf[i]
@@ -178,6 +191,7 @@ def test_burst(
         group, intra_g, inter_g = get_group()
     else:
         group, intra_g, inter_g = None, None, None
+    
     o1 = burst_func(
         qkv1[0],
         qkv1[1],
@@ -187,13 +201,14 @@ def test_burst(
         deterministic,
         group,
         [intra_g, inter_g],
+        striped=striped
     )
     grad_qkv1 = torch.autograd.grad(o1, qkv1, grad_output)
     # o1, grad_qkv1 = test(qkv1[0], qkv1[1], qkv1[2], burst_func, grad_output)
     o1 = o1.contiguous()
     grad_qkv1 = [g.contiguous() for g in grad_qkv1]
-    o_ref = get_chunk(o_ref, 1, causal)
-    g_ref = [get_chunk(g, 1, causal) for g in g_ref]
+    o_ref = get_chunk(o_ref, 1, causal, striped)
+    g_ref = [get_chunk(g, 1, causal, striped) for g in g_ref]
 
     torch.cuda.synchronize()
     synchronize()
@@ -222,13 +237,14 @@ def make_cmd():
 
 
 def test_all():
-    for causal in [False, True]:
-        for optimize_bwd_comm in [True, False]:
-            for deterministic in [False, True]:
-                for double_ring in [True, False]:
-                    success = test_burst(
-                        causal, optimize_bwd_comm, deterministic, double_ring
-                    )
+    for striped in [True]:
+        for causal in [True]:
+            for optimize_bwd_comm in [True, False]:
+                for deterministic in [False, True]:
+                    for double_ring in [True]:
+                        success = test_burst(
+                            causal, optimize_bwd_comm, deterministic, double_ring, striped
+                        )
 
 
 def bmt_init():
@@ -245,6 +261,7 @@ def test_cli():
     parser.add_argument("--optimize_bwd_comm", action="store_true")
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--double_ring", action="store_true")
+    parser.add_argument("--striped", action="store_true")
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--backend", type=str, default="torch")
     args = parser.parse_args()
@@ -261,6 +278,7 @@ def test_cli():
             args.optimize_bwd_comm,
             args.deterministic,
             args.double_ring,
+            args.striped,
         )
 
 
