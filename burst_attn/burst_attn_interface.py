@@ -185,13 +185,20 @@ class OpBurstAttn(torch.autograd.Function):
         acc_o = None
         lse_i = None
         ctx.deterministic = deterministic
-        if isinstance(double_group[0], tuple):
+        if isinstance(double_group[0], tuple) or isinstance(double_group[0], list):
             dq_group = (double_group[0][1], double_group[1][1])
             double_group = (double_group[0][0], double_group[1][0])
             ctx.dq_group = dq_group
         else:
             # dq share same group with other tensors in backward
             ctx.dq_group = None
+
+        if isinstance(process_group, list) or isinstance(process_group, tuple):
+            ctx.global_dq_group = process_group[1]
+            process_group = process_group[0]
+        else:
+            ctx.global_dq_group = process_group
+
         assert (
             not causal or flash == "cuda"
         ), "Causal attention only supported for Flash v2"
@@ -263,7 +270,7 @@ class OpBurstAttn(torch.autograd.Function):
         dv = torch.zeros_like(v)
         group, double_group = ctx.process_group, ctx.double_group
         dq_comm = Ring(
-            group, ctx.dq_group if ctx.dq_group is not None else double_group
+            ctx.global_dq_group, ctx.dq_group if ctx.dq_group is not None else double_group
         )
         burst_comm = Ring(group, double_group)
         if not ctx.optimize_bwd_comm:

@@ -154,7 +154,7 @@ def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0, causal=False):
         0.0,
         softmax_scale,
         causal=causal,
-        window_size=(-1, -1),
+        window_size=(-1, 0) if causal else (-1, -1),
         alibi_slopes=None,
         return_softmax=False,
     )
