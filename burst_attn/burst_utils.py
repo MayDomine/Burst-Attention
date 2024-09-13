@@ -26,10 +26,8 @@ def cuda_scale_out_lse_helper(
 ):
     o_i = o_i.to(torch.float32)
     lse_i = lse_i.transpose(-2, -1).unsqueeze(dim=-1).contiguous()
-    new_lse = lse + torch.log(1 + torch.exp(lse_i - lse))
-    o = torch.exp(lse - new_lse) * o + torch.exp(lse_i - new_lse) * o_i
-
-    lse = new_lse
+    o = o - torch.sigmoid(lse_i - lse) * (o - o_i)
+    lse = lse - torch.nn.functional.logsigmoid(lse - lse_i)
     return o, lse
 
 
