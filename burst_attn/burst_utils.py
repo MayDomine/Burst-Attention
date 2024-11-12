@@ -43,7 +43,7 @@ def inter_normal_attn(q, k, v, m_i, lse_i, acc_o, softmax_scale=1.0, mask_bias=N
     if mask_bias is not None:
         qk = torch.masked_fill(
             qk,
-            mask_bias == False,
+            not mask_bias,
             torch.scalar_tensor(float("-10000"), device=qk.device, dtype=qk.dtype),
         )
 
@@ -54,7 +54,7 @@ def inter_normal_attn(q, k, v, m_i, lse_i, acc_o, softmax_scale=1.0, mask_bias=N
     if mask_bias is not None:
         p = torch.masked_fill(
             p,
-            mask_bias == False,
+            not mask_bias,
             torch.scalar_tensor(float("0"), device=qk.device, dtype=qk.dtype),
         )
     l_ij = torch.sum(p, dim=-1, keepdim=True)
@@ -80,14 +80,14 @@ def inter_normal_attn_backward(
     if mask_bias is not None:
         qk = torch.masked_fill(
             qk,
-            mask_bias == False,
+            not mask_bias,
             torch.scalar_tensor(float("-10000"), device=qk.device, dtype=qk.dtype),
         )
     p = torch.exp(qk - lse)
     if mask_bias is not None:
         p = torch.masked_fill(
             p,
-            mask_bias == False,
+            not mask_bias,
             torch.scalar_tensor(float("0"), device=qk.device, dtype=qk.dtype),
         )
     d_v += p.transpose(-2, -1) @ do
@@ -112,7 +112,7 @@ def inter_flash_attn_triton(
         ).contiguous()
     if acc_o is None:
         acc_o = torch.zeros((b, s, n, d), dtype=torch.float32, device="cuda")
-    acc_o, lse_i, m_ij, softamx_scale = _flash_attn_forward(
+    acc_o, lse_i, m_ij, _ = _flash_attn_forward(
         q,
         k,
         v,
@@ -186,7 +186,6 @@ def inter_flash_cuda_bwd(
     dk,
     dv,
     softmax_scale,
-    mask_bias,
     causal=False,
     deterministic=False,
 ):
@@ -195,8 +194,9 @@ def inter_flash_cuda_bwd(
         # this feature requires a build of this PR: https://github.com/Dao-AILab/flash-attention/pull/905
         delta = o
         o = torch.empty_like(q)
-    elif len(o.shape) == 4:
+    else:
         delta = None
+
     if delta is not None:
         assert (
             delta.shape[2] >= 128

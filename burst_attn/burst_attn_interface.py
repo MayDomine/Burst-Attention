@@ -1,6 +1,5 @@
 import bmtrain as bmt
 import torch
-import torch.distributed as dist
 import math
 from .burst_utils import (
     inter_normal_attn,
@@ -11,8 +10,9 @@ from .burst_utils import (
     inter_flash_cuda_bwd,
 )
 from .burst_utils import triton_scale_out, record_stream
-from .comm import Ring, get_world_size, is_bmt_enable, get_rank, replicate
+from .comm import Ring, get_world_size,  get_rank, replicate
 from .log_helper import get_logger
+from typing import Callable
 
 _logger = get_logger(__file__, level="WARN")
 
@@ -35,7 +35,6 @@ def get_partition_id(double_group, r):
         % local_world_size
     )
     return round_r
-
 
 def attn_forward(flash, q, k, v, m_i, lse_i, acc_o, scale, bias, causal=False):
     assert not causal or flash == "cuda", "Causal attention only supported for Flash v2"
@@ -79,7 +78,6 @@ def attn_backward(
             dk,
             dv,
             scale,
-            bias,
             causal,
             **cuda_args,
         )
@@ -117,6 +115,7 @@ def burst_attn_func_striped(
     deterministic: bool = False,
     process_group=None,
     double_group=[None, None],
+    return_lse=False,
 ):
     return OpBurstAttnStrip.apply(
         q,
@@ -129,6 +128,7 @@ def burst_attn_func_striped(
         deterministic,
         process_group,
         double_group,
+        return_lse,
     )
 
 
@@ -143,6 +143,7 @@ def burst_attn_func(
     deterministic: bool = False,
     process_group=None,
     double_group=[None, None],
+    return_lse=False,
 ):
     return OpBurstAttn.apply(
         q,
@@ -155,6 +156,7 @@ def burst_attn_func(
         deterministic,
         process_group,
         double_group,
+        return_lse,
     )
 
 
@@ -179,7 +181,8 @@ class OpBurstAttn(torch.autograd.Function):
         optimize_bwd_comm=False,
         deterministic=False,
         process_group=None,
-        double_group=[None, None]
+        double_group=[None, None],
+        return_lse=False,
     ):
         m_i = None
         acc_o = None
@@ -257,10 +260,17 @@ class OpBurstAttn(torch.autograd.Function):
         acc_o = acc_o.to(dtype=q.dtype)
         lse_i = lse_i.squeeze(dim=-1).transpose(1, 2).contiguous()
         ctx.save_for_backward(q, ori_k, ori_v, lse_i, replicate(acc_o))
-        return acc_o
+        if return_lse:
+            return acc_o, lse_i
+        else:
+            return acc_o
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, *grad_output):
+        if isinstance(grad_output, tuple) and len(grad_output) == 2:
+            grad_output, _ = grad_output
+        else:
+            grad_output = grad_output[0]
         q, k, v, lse_i, o_i = ctx.saved_tensors
         q = q.contiguous()
         lse_i = lse_i.contiguous()
@@ -285,7 +295,6 @@ class OpBurstAttn(torch.autograd.Function):
             )
 
         sp_count = burst_comm.world_size
-        inter_size = burst_comm.inter_size
         half_seqlen = q.shape[1] // 2 if ctx.flash else q.shape[2] // 2
         dqkv_buf = [torch.empty_like(t) for t in [dq, dk, dv]]
         if ctx.causal:
@@ -395,14 +404,14 @@ class OpBurstAttn(torch.autograd.Function):
                 dq += dqkv_buf[0]
                 dk[:, :half_seqlen] += dk0
                 dv[:, :half_seqlen] += dv0
-        record.append(get_partition_id(double_group, r + 1))
+        record.append(get_partition_id(double_group, sp_count + 1))
         _logger.info(f"Backward Record of rank {get_rank()}: {record}")
-        dq_comm.double_ring_send_recv_q([dq], write_comm_buf, r + 1)
+        dq_comm.double_ring_send_recv_q([dq], write_comm_buf, sp_count + 1)
         dq_comm.commit()
         dq_comm.wait()
         dq = record_stream(*write_comm_buf)[0]
 
-        return dq, dk, dv, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None
 
 
 class OpBurstAttnStrip(torch.autograd.Function):
@@ -427,6 +436,7 @@ class OpBurstAttnStrip(torch.autograd.Function):
         deterministic=False,
         process_group=None,
         double_group=[None, None],
+        return_lse=False,
     ):
         m_i = None
         acc_o = None
@@ -497,10 +507,17 @@ class OpBurstAttnStrip(torch.autograd.Function):
         acc_o = acc_o.to(dtype=q.dtype)
         lse_i = lse_i.squeeze(dim=-1).transpose(1, 2).contiguous()
         ctx.save_for_backward(q, ori_k, ori_v, lse_i, replicate(acc_o))
-        return acc_o
+        if return_lse:
+            return acc_o, lse_i
+        else:
+            return acc_o
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, *grad_output):
+        if isinstance(grad_output, tuple) and len(grad_output) == 2:
+            grad_output, _ = grad_output
+        else:
+            grad_output = grad_output[0]
         q, k, v, lse_i, o_i = ctx.saved_tensors
         q = q.contiguous()
         lse_i = lse_i.contiguous()
@@ -525,7 +542,6 @@ class OpBurstAttnStrip(torch.autograd.Function):
             )
 
         sp_count = burst_comm.world_size
-        inter_size = burst_comm.inter_size
         dqkv_buf = [torch.empty_like(t) for t in [dq, dk, dv]]
         read_comm_buf = [torch.empty_like(t) for t in [delta, grad_output, q, lse_i]]
         write_comm_buf = [torch.empty_like(dq)]
@@ -610,9 +626,9 @@ class OpBurstAttnStrip(torch.autograd.Function):
                 dq[:, 1:] += dqkv_buf[0][:, 1:]
                 dk[:, :-1] += dqkv_buf[1][:, 1:]
                 dv[:, :-1] += dqkv_buf[2][:, 1:]
-        record.append(get_partition_id(double_group, r + 1))
+        record.append(get_partition_id(double_group, sp_count + 1))
         _logger.info(f"Backward Record of rank {get_rank()}: {record}")
-        dq_comm.double_ring_send_recv_q([dq], write_comm_buf, r + 1)
+        dq_comm.double_ring_send_recv_q([dq], write_comm_buf, sp_count + 1)
         dq_comm.commit()
         dq_comm.wait()
         dq = record_stream(*write_comm_buf)[0]
