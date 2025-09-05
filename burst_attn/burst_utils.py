@@ -2,9 +2,11 @@ import torch
 from .lao import _flash_attn_forward, _flash_attn_backward
 from flash_attn.flash_attn_interface import (
     _flash_attn_forward as _flash_attn_forward_cuda,
+    _flash_attn_varlen_forward as _flash_attn_varlen_forward_cuda,
 )
 from flash_attn.flash_attn_interface import (
     _flash_attn_backward as _flash_attn_backward_cuda,
+    _flash_attn_varlen_backward as _flash_attn_varlen_backward_cuda,
 )
 import inspect
 
@@ -144,18 +146,40 @@ def inter_flash_attn_backward_triton(
     )
 
 
-def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0, causal=False):
-    o_i, _, _, _, _, lse_i, _, _ = _flash_attn_forward_cuda(
-        q,
-        k,
-        v,
-        0.0,
-        softmax_scale,
-        causal=causal,
-        window_size=(-1, 0) if causal else (-1, -1),
-        alibi_slopes=None,
-        return_softmax=False,
-    )
+def inter_flash_cuda_fwd(q, k, v, o, lse, softmax_scale=1.0, causal=False, sliding_window=None, cu_seqlen=None):
+    if sliding_window:
+        window_size = sliding_window
+    else:
+        window_size = (-1, -1) 
+    if cu_seqlen is None:
+        o_i, _, _, _, _, lse_i, _, _ = _flash_attn_forward_cuda(
+            q,
+            k,
+            v,
+            0.0,
+            softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            alibi_slopes=None,
+            return_softmax=False,
+        )
+    else:
+        o_i, _, _, _, _, lse_i, _, _ = _flash_attn_varlen_forward_cuda(
+            q,
+            k,
+            v,
+            cu_seqlen,
+            cu_seqlen,
+            q.shape[1],
+            k.shape[1],
+            0.0,
+            softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            alibi_slopes=None,
+            return_softmax=False,
+            block_table={},
+        )
     if o is None:
         o = o_i.to(torch.float32)
         lse = lse_i.transpose(-2, -1).unsqueeze(dim=-1).contiguous()
@@ -188,6 +212,8 @@ def inter_flash_cuda_bwd(
     softmax_scale,
     causal=False,
     deterministic=False,
+    sliding_window=None,
+    cu_seqlen=None
 ):
     if len(o.shape) == 3:
         # use sum(o_i * gradoutput) as delta and pass a empty out to flash backward
@@ -196,17 +222,21 @@ def inter_flash_cuda_bwd(
         o = torch.empty_like(q)
     else:
         delta = None
-
+    
+    if sliding_window:
+        window_size = sliding_window
+    else:
+        window_size = (-1, -1) 
+    if cu_seqlen is not None:
+        cu_seqlen_args = (cu_seqlen, cu_seqlen, q.shape[0], k.shape[0])
+    else:
+        cu_seqlen_args = ()
+    bwd_func = _flash_attn_backward_cuda if cu_seqlen is None else _flash_attn_varlen_backward_cuda
     if delta is not None:
         assert (
             delta.shape[2] >= 128
         ), "optimize_bwd_comm is not supported for 128 or less sub-sequence length"
-        assert inspect.signature(_flash_attn_backward_cuda).parameters.get(
-            "softmax_d"
-        ), "optimize_bwd_comm is not supported for this version of flash-attention, \
-            you have to compile flash-attention with this PR: \
-            https://github.com/Dao-AILab/flash-attention/pull/1161"
-        res = _flash_attn_backward_cuda(
+        res = bwd_func(
             do,
             q,
             k,
@@ -216,17 +246,18 @@ def inter_flash_cuda_bwd(
             dq,
             dk,
             dv,
+            *cu_seqlen_args,
             0.0,
             softmax_scale,
             causal,
-            (-1, -1),
+            window_size,
             None,
             deterministic,  # determin
             None,
             softmax_d=delta,
         )
     else:
-        res = _flash_attn_backward_cuda(
+        res = bwd_func(
             do,
             q,
             k,
@@ -236,12 +267,13 @@ def inter_flash_cuda_bwd(
             dq,
             dk,
             dv,
+            *cu_seqlen_args,
             0.0,
             softmax_scale,
             causal,
-            (-1, -1),
+            window_size,
             None,
             deterministic,
             None,
-        )
+            )
     return res

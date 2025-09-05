@@ -65,6 +65,7 @@ bash test.sh
 
 ## Benchmark Results
 
+All experiments are conducted on 8×A800-SXM4-80GB GPUs and these GPUs are connected with NVLink.
 **Sequence Scaling Experiments setting**: batch size set to 1, 32 heads, and each head having a dimension of 128.
 
 

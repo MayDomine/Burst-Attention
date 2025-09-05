@@ -117,16 +117,19 @@ def test_ring_comm():
     comm.wait()
 
 
-def get_group(create_dq_group=True):
+def get_group(create_dq_group=False):
     # if dq use the same group with q, g, lse, softmax_d, it wont pass the correctness pass in double_ring
     if bmt.init.is_initialized():
         return (
             bmt.config["comm"],
+            # (bmt.config["local_comm"], bmt.config["local_idx_comm"]),
+            # bmt.config["local_comm"],
+            # bmt.config["local_idx_comm"],
             (bmt.config["local_comm"], bmt.config["local_comm2"]),
             (bmt.config["local_idx_comm"], bmt.config["local_idx_comm2"]),
         )
     else:
-        local_size = get_world_size() // 2
+        local_size = get_world_size() // 4
         group_ranks = np.array(list(range(get_world_size())))
         intra_ranks = group_ranks.reshape(-1, local_size)
         inter_ranks = intra_ranks.transpose()
@@ -148,11 +151,11 @@ def get_group(create_dq_group=True):
         else:
             return (
                 None,
-                (
-                    intra_group,
-                    intra_group2,
-                ),
-                (inter_group, inter_group2),
+                # (
+                intra_group,
+                intra_group2,
+                # ),
+                # (inter_group, inter_group2),
             )
 
 

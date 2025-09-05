@@ -118,7 +118,12 @@ class Ring:
         self.event = torch.cuda.Event(enable_timing=False)
         self.local_group = local_group[0]
         self.local_group2 = local_group[1]
-        self.double_ring = True if local_group[0] else False
+        self.intra_rank = get_rank(self.local_group)
+        self.inter_rank = get_rank(self.local_group2)
+        self.intra_size = get_world_size(self.local_group)
+        self.inter_size = get_world_size(self.local_group2)
+        self.double_ring = True if local_group[0] or self.inter_size == 1 or self.intra_size == 1 else False
+
         if self.double_ring and is_bmt_enable():
             if dq:
                 self.intra_stream = bmt.config["sp_stream3"]
@@ -134,10 +139,6 @@ class Ring:
                 self.intra_stream = bmt.config['sp_stream']
                 self.inter_stream = bmt.config['sp_stream']
 
-        self.inter_rank = get_rank(self.local_group2)
-        self.intra_rank = get_rank(self.local_group2)
-        self.intra_size = get_world_size(self.local_group)
-        self.inter_size = get_world_size(self.local_group2)
         self.buffer_list = []
 
         self.reqs = []
@@ -185,8 +186,8 @@ class Ring:
         return flag
 
     def double_ring_send_recv_q(self, tensor_list, dest_list, r=0):
-        if self.local_group is None:
-            self.double_ring_send_recv(tensor_list, dest_list, r)
+        if not self.double_ring:
+            self._ring_send_recv_base(tensor_list, dest_list)
         else:
             if r % self.intra_size == 1 and r != 1:
                 if not self.check_buffer(self.buffer_list, tensor_list):
@@ -219,11 +220,7 @@ class Ring:
 
 
     def double_ring_send_recv(self, tensor_list, dest_list, r=0):
-        if (
-            self.world_size == self.intra_size
-            or self.local_group is None
-            or self.local_group2 is None
-        ):
+        if not self.double_ring:
             self._ring_send_recv_base(tensor_list, dest_list)
         else:
             if r % self.intra_size == 1 and r // self.intra_size != self.inter_size - 1:
