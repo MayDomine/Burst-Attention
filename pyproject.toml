@@ -9,7 +9,6 @@ dependencies = [
         'pynvml',
         'einops',
         'flash-attn>=2.0.0',
-        'triton==2.0.0.dev20221202',
         'bmtrain==1.0.0'
         ]
 
